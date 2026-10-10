@@ -63,7 +63,7 @@ Add the dependency to your project's `main/idf_component.yml`:
 
 ```yaml
 dependencies:
-  scrambletoolsllc/esp_ptp_rpc: "*"
+  scrambletools/esp_ptp_rpc: "*"
 ```
 
 Then `#include "ptp_rpc_proto.h"` and call

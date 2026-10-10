@@ -4,6 +4,19 @@ A tiny additive RPC channel that lets a host MCU running gPTP issue
 Wi-Fi-radio operations on a coprocessor over the ESP-Hosted SDIO/SPI
 link, without forking ESP-Hosted itself.
 
+The source lives at <https://github.com/scrambletoolsllc/esp_ptp_rpc>.
+The component is published in the ESP Component Registry
+(<https://components.espressif.com>) under the **scrambletools**
+namespace, so depend on it as:
+
+```yaml
+dependencies:
+  scrambletools/esp_ptp_rpc: "*"
+```
+
+Old github.com/scrambletools/... links redirect to the
+scrambletoolsllc repos.
+
 ## Why
 
 In a P4+C6 split (the canonical AVB-over-Wi-Fi topology: ESP32-P4 host

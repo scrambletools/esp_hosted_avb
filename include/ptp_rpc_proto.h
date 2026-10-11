@@ -17,22 +17,27 @@
 #define PTP_RPC_MSG_SET_VENDOR_IE_ACK (PTP_RPC_MSG_BASE | 0x02U)
 
 /* Vendor IE constants shared between host marshaller, coprocessor RPC
- * handler, and STA parser. OUI is the Scramble Tools MA-L prefix
- * 8C:1F:64. Two sub-types, selected by vendor_oui_type:
+ * handler, and STA parser.
  *
- *   FOLLOWUP (0x00) — IEEE 802.1AS-2020 §12.7 FollowUpInformation
- *     payload; carries the BTC marker (preciseOriginTimestamp).
+ * Beacon time element (AVB Wireless §2.4.1): OUI 8C:1F:64, type 0x36,
+ * sub-ID octets C0 06 (the MA-S 8C-1F-64-36-C plus sub-ID 0x006), then
+ * the 76-byte §12.7 Follow_Up, the AP TSF (uint64_t LE µs) and an
+ * optional capture bracket (uint16_t LE µs).
  *
- *   TSF_MAPPING (0x01) — Scramble Tools-private mapping IE; 8 bytes
- *     of bridge AP-side TSF (uint64_t LE µs). Paired with the
- *     FOLLOWUP IE's preciseOriginTimestamp this gives the STA a
- *     (BTC, TSF) anchor that converts FTM t1 (TSF µs) to BTC time. */
+ * FOLLOWUP (0x00) is the earlier form, the Follow_Up and AP TSF with no
+ * sub-ID. Stations accept it during migration. */
 #define PTP_VND_IE_OUI0          0x8C
 #define PTP_VND_IE_OUI1          0x1F
 #define PTP_VND_IE_OUI2          0x64
+#define PTP_VND_IE_OUI_TYPE_AVB_WIRELESS 0x36
+#define PTP_VND_IE_SUBID0                0xC0
+#define PTP_VND_IE_SUBID1_BEACON_TIME    0x06
+#define PTP_VND_IE_SUBID_LEN             2
 #define PTP_VND_IE_OUI_TYPE_FOLLOWUP     0x00
-#define PTP_VND_IE_OUI_TYPE_TSF_MAPPING  0x01
+#define PTP_VND_IE_FOLLOW_UP_LEN            76
 #define PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN  8   /* uint64_t LE µs */
+#define PTP_VND_IE_CAPTURE_BRACKET_LEN      2   /* uint16_t LE µs */
+#define PTP_VND_IE_CAPTURE_BRACKET_UNKNOWN  0xFFFF
 
 /* SET_VENDOR_IE_REQ wire layout: this 4-byte header followed by a
  * full vendor_ie_data_t buffer (element_id + length + OUI + oui_type

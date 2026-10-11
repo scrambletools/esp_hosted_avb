@@ -63,29 +63,39 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
     goto send_ack;
   }
 
-  /* Combined FollowUpInformation IE patch: the host appends an 8-byte
-   * AP-TSF placeholder after the §12.7 FollowUpInformation. Fill those
-   * trailing bytes with esp_wifi_get_tsf_time(WIFI_IF_AP) (LE µs) here,
-   * right before they reach the wifi blob, so the AP-TSF marker is
-   * captured atomically with the beacon carrying this BTC
-   * (preciseOriginTimestamp). The host cannot read the AP TSF itself
+  /* Beacon time element patch: the host leaves the AP TSF zero after the
+   * §12.7 Follow_Up. Fill it with esp_wifi_get_tsf_time(WIFI_IF_AP) (LE
+   * µs) here, right before the element reaches the wifi blob, so the
+   * AP-TSF marker is captured atomically with the beacon carrying this
+   * BTC (preciseOriginTimestamp). The host cannot read the AP TSF itself
    * (its remote esp_wifi_get_tsf_time returns -1), so only the
-   * coprocessor can supply it. The placeholder is the LAST
-   * PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN bytes of the IE. */
-  if (hdr->enable &&
-      vnd_ie_len >= 6 + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN &&
-      vnd_ie[2] == PTP_VND_IE_OUI0 && vnd_ie[3] == PTP_VND_IE_OUI1 &&
-      vnd_ie[4] == PTP_VND_IE_OUI2 &&
-      vnd_ie[5] == PTP_VND_IE_OUI_TYPE_FOLLOWUP) {
+   * coprocessor can supply it. The earlier FOLLOWUP form carries the TSF
+   * in its last PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN bytes. */
+  size_t tsf_offset = 0;
+  if (hdr->enable && vnd_ie[2] == PTP_VND_IE_OUI0 &&
+      vnd_ie[3] == PTP_VND_IE_OUI1 && vnd_ie[4] == PTP_VND_IE_OUI2) {
+    if (vnd_ie[5] == PTP_VND_IE_OUI_TYPE_AVB_WIRELESS &&
+        vnd_ie_len >= 6 + PTP_VND_IE_SUBID_LEN &&
+        vnd_ie[6] == PTP_VND_IE_SUBID0 &&
+        vnd_ie[7] == PTP_VND_IE_SUBID1_BEACON_TIME) {
+      tsf_offset = 6 + PTP_VND_IE_SUBID_LEN + PTP_VND_IE_FOLLOW_UP_LEN;
+    } else if (vnd_ie[5] == PTP_VND_IE_OUI_TYPE_FOLLOWUP &&
+               vnd_ie_len >= 6 + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN) {
+      tsf_offset = vnd_ie_len - PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN;
+    }
+  }
+  if (tsf_offset != 0 &&
+      tsf_offset + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN <= vnd_ie_len) {
     int64_t tsf_us = esp_wifi_get_tsf_time(WIFI_IF_AP);
     uint64_t v = (uint64_t)tsf_us;
-    uint8_t *tsf = vnd_ie + vnd_ie_len - PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN;
+    uint8_t *tsf = vnd_ie + tsf_offset;
     for (int i = 0; i < PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN; ++i) {
       tsf[i] = (uint8_t)((v >> (8 * i)) & 0xff);
     }
     static uint32_t s_tsf_fills = 0;
     if ((++s_tsf_fills % 25) == 1) {
-      ESP_LOGI(TAG, "FollowUp IE AP-TSF patched #%u: tsf=%lld us idx=%u",
+      ESP_LOGI(TAG,
+               "Beacon time element AP-TSF patched #%u: tsf=%lld us idx=%u",
                (unsigned)s_tsf_fills, (long long)tsf_us, hdr->idx);
     }
   }

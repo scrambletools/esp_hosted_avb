@@ -63,6 +63,21 @@ component is linked in.
 | --- | --- | --- | --- |
 | `0x50545001` | `PTP_RPC_MSG_SET_VENDOR_IE_REQ` | host → coprocessor | 4-byte header + full `vendor_ie_data_t` buffer |
 | `0x50545002` | `PTP_RPC_MSG_SET_VENDOR_IE_ACK` | coprocessor → host | `int32_t esp_err_t` |
+| `0x50545003` | `PTP_RPC_MSG_ASSOCIATIONS_REQ` | host → coprocessor | `uint8_t` version |
+| `0x50545004` | `PTP_RPC_MSG_ASSOCIATIONS` | coprocessor → host | `ptp_rpc_associations_t` |
+
+`ASSOCIATIONS` lists the stations associated with the coprocessor's
+access point, with a random per-boot `radio_boot` and a `generation`
+that advances with every change. The coprocessor sends it after each
+join, leave and AP stop has been forwarded to the host, and in answer
+to `ASSOCIATIONS_REQ`. `esp_ptp` reconciles its gPTP peers to it, so
+the host sends Announce and Signaling only to stations the radio has.
+The list follows the hooks that `esp-hosted-association-lifecycle.patch`
+adds to the coprocessor's esp-hosted; the `LIFECYCLE` flag says they
+are live. Without the patch the flag stays clear and `esp_ptp` goes by
+the host's own association events. Other coprocessor components can
+follow the same list through the weak `ptp_rpc_associations_changed`
+and `ptp_rpc_associations_forwarded` hooks.
 
 `0x5054_5000` (`"PTP\0"`) is the message-ID base; the low byte is the
 opcode. Reserved for future expansion (e.g. FTM-frame Vendor IE
@@ -96,11 +111,15 @@ CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 ```
 
 The handler self-registers at startup; the coprocessor app does not
-need to know about this component.
+need to know about this component. It takes two of the coprocessor's
+custom message handlers, and `CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS`
+defaults to 3, so raise it when other components register their own: a
+component that checks its registration otherwise aborts at boot, and an
+SDIO coprocessor that cannot boot cannot take an SDIO update either.
 
 ## Status
 
-Vendor-IE install is live and over-air-verified. Future
+Vendor-IE install and association reporting are live. Future
 opcodes will land here as the AVB-over-Wi-Fi plan needs them; the
 wire format is versioned only via opcode additions to keep host and
 coprocessor sides loosely coupled.

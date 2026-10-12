@@ -15,6 +15,8 @@
 #define PTP_RPC_MSG_BASE              0x50545000U
 #define PTP_RPC_MSG_SET_VENDOR_IE_REQ (PTP_RPC_MSG_BASE | 0x01U)
 #define PTP_RPC_MSG_SET_VENDOR_IE_ACK (PTP_RPC_MSG_BASE | 0x02U)
+#define PTP_RPC_MSG_ASSOCIATIONS_REQ  (PTP_RPC_MSG_BASE | 0x03U)
+#define PTP_RPC_MSG_ASSOCIATIONS      (PTP_RPC_MSG_BASE | 0x04U)
 
 /* Vendor IE constants shared between host marshaller, coprocessor RPC
  * handler, and STA parser.
@@ -55,3 +57,28 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
   int32_t esp_err;
 } ptp_rpc_set_vendor_ie_ack_t;
+
+/* ASSOCIATIONS wire layout: the stations associated with the
+ * coprocessor's access point, sent after each join, leave and AP stop
+ * has been forwarded to the host, and in answer to ASSOCIATIONS_REQ
+ * (which carries only the version byte). The host reconciles its gPTP
+ * peers to it, so it serves only the stations the radio has. radio_boot
+ * is random per coprocessor boot and generation advances with every
+ * change; neither is ever 0. LIFECYCLE is set once the coprocessor's
+ * esp-hosted reports association changes (the association lifecycle
+ * patch); until then the list cannot be trusted and the host goes by
+ * its own events. The coprocessor registers two custom message handlers
+ * for this component. */
+#define PTP_RPC_ASSOCIATIONS_VERSION        1
+#define PTP_RPC_ASSOCIATIONS_MAX            16
+#define PTP_RPC_ASSOCIATIONS_FLAG_LIFECYCLE 0x01
+
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t flags;
+  uint8_t count;
+  uint8_t reserved;
+  uint32_t radio_boot;
+  uint32_t generation;
+  uint8_t macs[PTP_RPC_ASSOCIATIONS_MAX][6];
+} ptp_rpc_associations_t;

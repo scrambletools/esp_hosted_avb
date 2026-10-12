@@ -10,10 +10,13 @@
 #include "ptp_rpc_proto.h"
 
 #include <stddef.h>
+#include <string.h>
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types_generic.h"
+#include "freertos/FreeRTOS.h"
 
 /* esp_hosted_peer_data.h lives inside upstream
  * esp-hosted-mcu/slave/main and is not exported as a component
@@ -128,11 +131,117 @@ send_ack: {
 }
 }
 
+/* The AP's associations. esp-hosted's association lifecycle patch calls
+ * ftm_radio_association_begin before it forwards each join, leave or AP
+ * stop to the host, and ftm_radio_association_complete after, so the
+ * list reaches the host behind the event it follows. */
+static portMUX_TYPE s_associations_lock = portMUX_INITIALIZER_UNLOCKED;
+static ptp_rpc_associations_t s_associations = {
+    .version = PTP_RPC_ASSOCIATIONS_VERSION, .generation = 1};
+
+uint32_t ptp_rpc_radio_boot(void) {
+  portENTER_CRITICAL(&s_associations_lock);
+  if (s_associations.radio_boot == 0) {
+    s_associations.radio_boot = esp_random() | 1U;
+  }
+  uint32_t radio_boot = s_associations.radio_boot;
+  portEXIT_CRITICAL(&s_associations_lock);
+  return radio_boot;
+}
+
+static void send_associations(void) {
+  (void)ptp_rpc_radio_boot();
+  ptp_rpc_associations_t snapshot;
+  portENTER_CRITICAL(&s_associations_lock);
+  snapshot = s_associations;
+  portEXIT_CRITICAL(&s_associations_lock);
+  esp_err_t r = esp_hosted_send_custom_data(
+      PTP_RPC_MSG_ASSOCIATIONS, (const uint8_t *)&snapshot, sizeof(snapshot));
+  if (r != ESP_OK) {
+    ESP_LOGW(TAG, "ASSOCIATIONS send failed: %s", esp_err_to_name(r));
+  }
+}
+
+/* Lifecycle hooks the patched esp-hosted calls; mac is NULL for an AP
+ * stop. Returns the new generation, or 0 for an address no station can
+ * have or a full list, either of which leaves the list unchanged. */
+uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined);
+void ftm_radio_association_complete(uint32_t generation, bool queued);
+
+uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
+  static const uint8_t zero_mac[6] = {0};
+  if (mac != NULL && ((mac[0] & 1) || memcmp(mac, zero_mac, 6) == 0)) {
+    return 0;
+  }
+  (void)ptp_rpc_radio_boot();
+  ptp_rpc_associations_t snapshot = {0};
+  uint32_t generation = 0;
+  portENTER_CRITICAL(&s_associations_lock);
+  ptp_rpc_associations_t *state = &s_associations;
+  int found = -1;
+  for (int i = 0; mac != NULL && i < state->count; i++) {
+    if (memcmp(state->macs[i], mac, 6) == 0) {
+      found = i;
+      break;
+    }
+  }
+  bool full = mac != NULL && joined && found < 0 &&
+              state->count == PTP_RPC_ASSOCIATIONS_MAX;
+  if (!full) {
+    if (mac == NULL) {
+      state->count = 0;
+      memset(state->macs, 0, sizeof(state->macs));
+    } else if (!joined && found >= 0) {
+      state->count--;
+      memcpy(state->macs[found], state->macs[state->count], 6);
+      memset(state->macs[state->count], 0, 6);
+    } else if (joined && found < 0) {
+      memcpy(state->macs[state->count++], mac, 6);
+    }
+    if (++state->generation == 0) {
+      ++state->generation;
+    }
+    state->flags |= PTP_RPC_ASSOCIATIONS_FLAG_LIFECYCLE;
+    generation = state->generation;
+    snapshot = *state;
+  }
+  portEXIT_CRITICAL(&s_associations_lock);
+  if (generation != 0 && ptp_rpc_associations_changed) {
+    ptp_rpc_associations_changed(&snapshot);
+  }
+  return generation;
+}
+
+void ftm_radio_association_complete(uint32_t generation, bool queued) {
+  if (ptp_rpc_associations_forwarded) {
+    ptp_rpc_associations_forwarded(generation, queued);
+  }
+  /* Sent even when the host's event was not queued: the list brings the
+   * host back to the radio's associations either way. */
+  send_associations();
+}
+
+static void associations_request_callback(uint32_t msg_id,
+                                          const uint8_t *data,
+                                          size_t data_len, void *user) {
+  (void)msg_id;
+  (void)data;
+  (void)data_len;
+  (void)user;
+  send_associations();
+}
+
 esp_err_t ptp_custom_rpc_init(void) {
   esp_err_t r = esp_hosted_register_custom_callback(
       PTP_RPC_MSG_SET_VENDOR_IE_REQ, set_vendor_ie_callback, NULL);
   if (r != ESP_OK) {
     ESP_LOGE(TAG, "register SET_VENDOR_IE_REQ failed: %s", esp_err_to_name(r));
+    return r;
+  }
+  r = esp_hosted_register_custom_callback(PTP_RPC_MSG_ASSOCIATIONS_REQ,
+                                          associations_request_callback, NULL);
+  if (r != ESP_OK) {
+    ESP_LOGE(TAG, "register ASSOCIATIONS_REQ failed: %s", esp_err_to_name(r));
     return r;
   }
   ESP_LOGI(TAG, "PTP custom RPC handler registered (msg_id=0x%08x)",

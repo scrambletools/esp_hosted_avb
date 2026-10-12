@@ -9,6 +9,7 @@
 #include "ptp_custom_rpc.h"
 #include "ptp_rpc_proto.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 #include "esp_err.h"
@@ -17,6 +18,8 @@
 #include "esp_wifi.h"
 #include "esp_wifi_types_generic.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 /* esp_hosted_peer_data.h lives inside upstream
  * esp-hosted-mcu/slave/main and is not exported as a component
@@ -31,16 +34,117 @@ extern esp_err_t esp_hosted_register_custom_callback(
 
 static const char *TAG = "ptp";
 
+/* Replies leave through their own task. A custom-RPC callback runs on
+ * esp-hosted's pserial task, and esp_hosted_send_custom_data queues onto
+ * that task's own request queue with no timeout: once requests back up,
+ * as under a heavy station uplink, a reply sent from the callback blocks
+ * the only task that drains the queue, and the coprocessor's RPC and
+ * SDIO receive paths stop for good. */
+#define REPLY_QUEUE_DEPTH 8
+#define REPLY_TASK_STACK 3072
+#define REPLY_TASK_PRIORITY 5
+
+typedef struct {
+  uint32_t msg_id;
+  ptp_rpc_set_vendor_ie_ack_t ack;
+} ptp_rpc_reply_t;
+
+static QueueHandle_t s_replies;
+static atomic_bool s_associations_queued;
+static atomic_uint s_replies_dropped;
+
+static void send_associations(void);
+static void reply_task(void *arg);
+
+/* Started on first use, from a task: init runs as a constructor. A reply
+ * that races the start is dropped like one that finds the queue full. */
+static bool reply_queue_ready(void) {
+  static portMUX_TYPE start_lock = portMUX_INITIALIZER_UNLOCKED;
+  static bool starting;
+  if (s_replies != NULL) {
+    return true;
+  }
+  portENTER_CRITICAL(&start_lock);
+  bool claimed = !starting;
+  starting = true;
+  portEXIT_CRITICAL(&start_lock);
+  if (!claimed) {
+    return false;
+  }
+  QueueHandle_t queue = xQueueCreate(REPLY_QUEUE_DEPTH, sizeof(ptp_rpc_reply_t));
+  if (queue == NULL ||
+      xTaskCreate(reply_task, "ptp_rpc_reply", REPLY_TASK_STACK, queue,
+                  REPLY_TASK_PRIORITY, NULL) != pdPASS) {
+    ESP_LOGE(TAG, "failed to start the reply task");
+    if (queue != NULL) {
+      vQueueDelete(queue);
+    }
+    portENTER_CRITICAL(&start_lock);
+    starting = false;
+    portEXIT_CRITICAL(&start_lock);
+    return false;
+  }
+  s_replies = queue;
+  return true;
+}
+
+/* Never waits: a reply that does not fit is dropped. The host logs only
+ * a failed ACK and refreshes the associations itself. */
+static bool queue_reply(const ptp_rpc_reply_t *reply) {
+  if (reply_queue_ready() && xQueueSend(s_replies, reply, 0) == pdTRUE) {
+    return true;
+  }
+  unsigned dropped = atomic_fetch_add(&s_replies_dropped, 1) + 1;
+  if (dropped == 1 || dropped % 100 == 0) {
+    ESP_LOGW(TAG, "reply queue full, %u replies dropped", dropped);
+  }
+  return false;
+}
+
+/* One report pending at a time; the task takes the snapshot when it
+ * sends, so a report queued behind a change still carries it. */
+static void queue_associations(void) {
+  if (atomic_exchange(&s_associations_queued, true)) {
+    return;
+  }
+  ptp_rpc_reply_t reply = {.msg_id = PTP_RPC_MSG_ASSOCIATIONS};
+  if (!queue_reply(&reply)) {
+    atomic_store(&s_associations_queued, false);
+  }
+}
+
+static void reply_task(void *arg) {
+  QueueHandle_t queue = arg;
+  ptp_rpc_reply_t reply;
+  for (;;) {
+    if (xQueueReceive(queue, &reply, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+    if (reply.msg_id == PTP_RPC_MSG_ASSOCIATIONS) {
+      atomic_store(&s_associations_queued, false);
+      send_associations();
+      continue;
+    }
+    esp_err_t sent = esp_hosted_send_custom_data(
+        reply.msg_id, (const uint8_t *)&reply.ack, sizeof(reply.ack));
+    if (sent != ESP_OK) {
+      ESP_LOGE(TAG, "SET_VENDOR_IE_ACK send failed: %s", esp_err_to_name(sent));
+    }
+  }
+}
+
 static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
                                    size_t data_len, void *user) {
   (void)msg_id;
   (void)user;
 
-  ptp_rpc_set_vendor_ie_ack_t ack = {.esp_err = ESP_OK};
+  ptp_rpc_reply_t reply = {.msg_id = PTP_RPC_MSG_SET_VENDOR_IE_ACK,
+                           .ack = {.esp_err = ESP_OK}};
+  ptp_rpc_set_vendor_ie_ack_t *const ack = &reply.ack;
 
   if (data == NULL || data_len < sizeof(ptp_rpc_set_vendor_ie_t)) {
     ESP_LOGW(TAG, "SET_VENDOR_IE_REQ too short: %zu", data_len);
-    ack.esp_err = ESP_ERR_INVALID_SIZE;
+    ack->esp_err = ESP_ERR_INVALID_SIZE;
     goto send_ack;
   }
 
@@ -62,7 +166,7 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
   /* vendor_ie_data_t needs at least its 6-byte fixed header. */
   if (hdr->enable && vnd_ie_len < 6) {
     ESP_LOGW(TAG, "SET_VENDOR_IE_REQ vnd_ie too short: %zu", vnd_ie_len);
-    ack.esp_err = ESP_ERR_INVALID_SIZE;
+    ack->esp_err = ESP_ERR_INVALID_SIZE;
     goto send_ack;
   }
 
@@ -113,22 +217,17 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
     (void)esp_wifi_set_vendor_ie(false, (wifi_vendor_ie_type_t)hdr->type,
                                  (wifi_vendor_ie_id_t)hdr->idx, NULL);
   }
-  ack.esp_err = esp_wifi_set_vendor_ie((bool)hdr->enable,
+  ack->esp_err = esp_wifi_set_vendor_ie((bool)hdr->enable,
                                        (wifi_vendor_ie_type_t)hdr->type,
                                        (wifi_vendor_ie_id_t)hdr->idx, vnd_ie);
-  if (ack.esp_err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_wifi_set_vendor_ie: %s", esp_err_to_name(ack.esp_err));
+  if (ack->esp_err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_wifi_set_vendor_ie: %s", esp_err_to_name(ack->esp_err));
   }
   /* Periodic-publish path: no INFO log on success — would spam at the
    * Sync interval (8 Hz for gPTP default). Errors still log. */
 
-send_ack: {
-  esp_err_t s = esp_hosted_send_custom_data(PTP_RPC_MSG_SET_VENDOR_IE_ACK,
-                                            (const uint8_t *)&ack, sizeof(ack));
-  if (s != ESP_OK) {
-    ESP_LOGE(TAG, "SET_VENDOR_IE_ACK send failed: %s", esp_err_to_name(s));
-  }
-}
+send_ack:
+  (void)queue_reply(&reply);
 }
 
 /* The AP's associations. esp-hosted's association lifecycle patch calls
@@ -217,8 +316,9 @@ void ftm_radio_association_complete(uint32_t generation, bool queued) {
     ptp_rpc_associations_forwarded(generation, queued);
   }
   /* Sent even when the host's event was not queued: the list brings the
-   * host back to the radio's associations either way. */
-  send_associations();
+   * host back to the radio's associations either way. The event is
+   * already queued to the host, so the report still lands behind it. */
+  queue_associations();
 }
 
 static void associations_request_callback(uint32_t msg_id,
@@ -228,7 +328,7 @@ static void associations_request_callback(uint32_t msg_id,
   (void)data;
   (void)data_len;
   (void)user;
-  send_associations();
+  queue_associations();
 }
 
 esp_err_t ptp_custom_rpc_init(void) {

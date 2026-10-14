@@ -2,12 +2,12 @@
  * Copyright 2026 Scramble Tools
  * License: MIT
  *
- * Coprocessor-side handler for the PTP custom-RPC channel.
+ * Coprocessor side of esp_hosted_avb.
  * See README.md for protocol and rationale.
  */
 
-#include "ptp_custom_rpc.h"
-#include "ptp_rpc_proto.h"
+#include "hosted_avb.h"
+#include "hosted_avb_proto.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -32,7 +32,7 @@ extern esp_err_t esp_hosted_register_custom_callback(
     void (*cb)(uint32_t, const uint8_t *, size_t, void *),
     void *user);
 
-static const char *TAG = "ptp";
+static const char *TAG = "hosted_avb";
 
 /* Replies leave through their own task. A custom-RPC callback runs on
  * esp-hosted's pserial task, and esp_hosted_send_custom_data queues onto
@@ -46,8 +46,8 @@ static const char *TAG = "ptp";
 
 typedef struct {
   uint32_t msg_id;
-  ptp_rpc_set_vendor_ie_ack_t ack;
-} ptp_rpc_reply_t;
+  hosted_avb_set_vendor_ie_ack_t ack;
+} hosted_avb_reply_t;
 
 static QueueHandle_t s_replies;
 static atomic_bool s_associations_queued;
@@ -71,9 +71,10 @@ static bool reply_queue_ready(void) {
   if (!claimed) {
     return false;
   }
-  QueueHandle_t queue = xQueueCreate(REPLY_QUEUE_DEPTH, sizeof(ptp_rpc_reply_t));
+  QueueHandle_t queue =
+      xQueueCreate(REPLY_QUEUE_DEPTH, sizeof(hosted_avb_reply_t));
   if (queue == NULL ||
-      xTaskCreate(reply_task, "ptp_rpc_reply", REPLY_TASK_STACK, queue,
+      xTaskCreate(reply_task, "hosted_avb_tx", REPLY_TASK_STACK, queue,
                   REPLY_TASK_PRIORITY, NULL) != pdPASS) {
     ESP_LOGE(TAG, "failed to start the reply task");
     if (queue != NULL) {
@@ -90,7 +91,7 @@ static bool reply_queue_ready(void) {
 
 /* Never waits: a reply that does not fit is dropped. The host logs only
  * a failed ACK and refreshes the associations itself. */
-static bool queue_reply(const ptp_rpc_reply_t *reply) {
+static bool queue_reply(const hosted_avb_reply_t *reply) {
   if (reply_queue_ready() && xQueueSend(s_replies, reply, 0) == pdTRUE) {
     return true;
   }
@@ -107,7 +108,7 @@ static void queue_associations(void) {
   if (atomic_exchange(&s_associations_queued, true)) {
     return;
   }
-  ptp_rpc_reply_t reply = {.msg_id = PTP_RPC_MSG_ASSOCIATIONS};
+  hosted_avb_reply_t reply = {.msg_id = HOSTED_AVB_MSG_ASSOCIATIONS};
   if (!queue_reply(&reply)) {
     atomic_store(&s_associations_queued, false);
   }
@@ -115,12 +116,12 @@ static void queue_associations(void) {
 
 static void reply_task(void *arg) {
   QueueHandle_t queue = arg;
-  ptp_rpc_reply_t reply;
+  hosted_avb_reply_t reply;
   for (;;) {
     if (xQueueReceive(queue, &reply, portMAX_DELAY) != pdTRUE) {
       continue;
     }
-    if (reply.msg_id == PTP_RPC_MSG_ASSOCIATIONS) {
+    if (reply.msg_id == HOSTED_AVB_MSG_ASSOCIATIONS) {
       atomic_store(&s_associations_queued, false);
       send_associations();
       continue;
@@ -138,19 +139,20 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
   (void)msg_id;
   (void)user;
 
-  ptp_rpc_reply_t reply = {.msg_id = PTP_RPC_MSG_SET_VENDOR_IE_ACK,
+  hosted_avb_reply_t reply = {.msg_id = HOSTED_AVB_MSG_SET_VENDOR_IE_ACK,
                            .ack = {.esp_err = ESP_OK}};
-  ptp_rpc_set_vendor_ie_ack_t *const ack = &reply.ack;
+  hosted_avb_set_vendor_ie_ack_t *const ack = &reply.ack;
 
-  if (data == NULL || data_len < sizeof(ptp_rpc_set_vendor_ie_t)) {
+  if (data == NULL || data_len < sizeof(hosted_avb_set_vendor_ie_t)) {
     ESP_LOGW(TAG, "SET_VENDOR_IE_REQ too short: %zu", data_len);
     ack->esp_err = ESP_ERR_INVALID_SIZE;
     goto send_ack;
   }
 
-  const ptp_rpc_set_vendor_ie_t *hdr = (const ptp_rpc_set_vendor_ie_t *)data;
-  uint8_t *vnd_ie = (uint8_t *)(data + sizeof(ptp_rpc_set_vendor_ie_t));
-  const size_t vnd_ie_len = data_len - sizeof(ptp_rpc_set_vendor_ie_t);
+  const hosted_avb_set_vendor_ie_t *hdr =
+      (const hosted_avb_set_vendor_ie_t *)data;
+  uint8_t *vnd_ie = (uint8_t *)(data + sizeof(hosted_avb_set_vendor_ie_t));
+  const size_t vnd_ie_len = data_len - sizeof(hosted_avb_set_vendor_ie_t);
 
   static uint32_t s_calls = 0;
   ++s_calls;
@@ -235,10 +237,10 @@ send_ack:
  * stop to the host, and ftm_radio_association_complete after, so the
  * list reaches the host behind the event it follows. */
 static portMUX_TYPE s_associations_lock = portMUX_INITIALIZER_UNLOCKED;
-static ptp_rpc_associations_t s_associations = {
-    .version = PTP_RPC_ASSOCIATIONS_VERSION, .generation = 1};
+static hosted_avb_associations_t s_associations = {
+    .version = HOSTED_AVB_ASSOCIATIONS_VERSION, .generation = 1};
 
-uint32_t ptp_rpc_radio_boot(void) {
+uint32_t hosted_avb_radio_boot(void) {
   portENTER_CRITICAL(&s_associations_lock);
   if (s_associations.radio_boot == 0) {
     s_associations.radio_boot = esp_random() | 1U;
@@ -249,13 +251,14 @@ uint32_t ptp_rpc_radio_boot(void) {
 }
 
 static void send_associations(void) {
-  (void)ptp_rpc_radio_boot();
-  ptp_rpc_associations_t snapshot;
+  (void)hosted_avb_radio_boot();
+  hosted_avb_associations_t snapshot;
   portENTER_CRITICAL(&s_associations_lock);
   snapshot = s_associations;
   portEXIT_CRITICAL(&s_associations_lock);
-  esp_err_t r = esp_hosted_send_custom_data(
-      PTP_RPC_MSG_ASSOCIATIONS, (const uint8_t *)&snapshot, sizeof(snapshot));
+  esp_err_t r = esp_hosted_send_custom_data(HOSTED_AVB_MSG_ASSOCIATIONS,
+                                            (const uint8_t *)&snapshot,
+                                            sizeof(snapshot));
   if (r != ESP_OK) {
     ESP_LOGW(TAG, "ASSOCIATIONS send failed: %s", esp_err_to_name(r));
   }
@@ -272,11 +275,11 @@ uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
   if (mac != NULL && ((mac[0] & 1) || memcmp(mac, zero_mac, 6) == 0)) {
     return 0;
   }
-  (void)ptp_rpc_radio_boot();
-  ptp_rpc_associations_t snapshot = {0};
+  (void)hosted_avb_radio_boot();
+  hosted_avb_associations_t snapshot = {0};
   uint32_t generation = 0;
   portENTER_CRITICAL(&s_associations_lock);
-  ptp_rpc_associations_t *state = &s_associations;
+  hosted_avb_associations_t *state = &s_associations;
   int found = -1;
   for (int i = 0; mac != NULL && i < state->count; i++) {
     if (memcmp(state->macs[i], mac, 6) == 0) {
@@ -285,7 +288,7 @@ uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
     }
   }
   bool full = mac != NULL && joined && found < 0 &&
-              state->count == PTP_RPC_ASSOCIATIONS_MAX;
+              state->count == HOSTED_AVB_ASSOCIATIONS_MAX;
   if (!full) {
     if (mac == NULL) {
       state->count = 0;
@@ -300,20 +303,20 @@ uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
     if (++state->generation == 0) {
       ++state->generation;
     }
-    state->flags |= PTP_RPC_ASSOCIATIONS_FLAG_LIFECYCLE;
+    state->flags |= HOSTED_AVB_ASSOCIATIONS_FLAG_LIFECYCLE;
     generation = state->generation;
     snapshot = *state;
   }
   portEXIT_CRITICAL(&s_associations_lock);
-  if (generation != 0 && ptp_rpc_associations_changed) {
-    ptp_rpc_associations_changed(&snapshot);
+  if (generation != 0 && hosted_avb_associations_changed) {
+    hosted_avb_associations_changed(&snapshot);
   }
   return generation;
 }
 
 void ftm_radio_association_complete(uint32_t generation, bool queued) {
-  if (ptp_rpc_associations_forwarded) {
-    ptp_rpc_associations_forwarded(generation, queued);
+  if (hosted_avb_associations_forwarded) {
+    hosted_avb_associations_forwarded(generation, queued);
   }
   /* Sent even when the host's event was not queued: the list brings the
    * host back to the radio's associations either way. The event is
@@ -331,28 +334,28 @@ static void associations_request_callback(uint32_t msg_id,
   queue_associations();
 }
 
-esp_err_t ptp_custom_rpc_init(void) {
+esp_err_t hosted_avb_init(void) {
   esp_err_t r = esp_hosted_register_custom_callback(
-      PTP_RPC_MSG_SET_VENDOR_IE_REQ, set_vendor_ie_callback, NULL);
+      HOSTED_AVB_MSG_SET_VENDOR_IE_REQ, set_vendor_ie_callback, NULL);
   if (r != ESP_OK) {
     ESP_LOGE(TAG, "register SET_VENDOR_IE_REQ failed: %s", esp_err_to_name(r));
     return r;
   }
-  r = esp_hosted_register_custom_callback(PTP_RPC_MSG_ASSOCIATIONS_REQ,
+  r = esp_hosted_register_custom_callback(HOSTED_AVB_MSG_ASSOCIATIONS_REQ,
                                           associations_request_callback, NULL);
   if (r != ESP_OK) {
     ESP_LOGE(TAG, "register ASSOCIATIONS_REQ failed: %s", esp_err_to_name(r));
     return r;
   }
-  ESP_LOGI(TAG, "PTP custom RPC handler registered (msg_id=0x%08x)",
-           (unsigned)PTP_RPC_MSG_SET_VENDOR_IE_REQ);
+  ESP_LOGI(TAG, "handlers registered (msg_id base 0x%08x)",
+           (unsigned)HOSTED_AVB_MSG_BASE);
   return ESP_OK;
 }
 
 /* Auto-register so the coprocessor app doesn't need to call us from
  * app_main. Safe at constructor time: upstream's register API lazy-
  * initializes its mutex and the dispatch table is BSS-zero. Re-calling
- * ptp_custom_rpc_init() from user code is harmless. */
-__attribute__((constructor)) static void ptp_custom_rpc_autoreg(void) {
-  (void)ptp_custom_rpc_init();
+ * hosted_avb_init() from user code is harmless. */
+__attribute__((constructor)) static void hosted_avb_autoreg(void) {
+  (void)hosted_avb_init();
 }

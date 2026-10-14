@@ -1,17 +1,24 @@
-# PTP custom-RPC over ESP-Hosted
+# esp_hosted_avb
 
-A tiny additive RPC channel that lets a host MCU running gPTP issue
-Wi-Fi-radio operations on a coprocessor over the ESP-Hosted SDIO/SPI
-link, without forking ESP-Hosted itself.
+AVB extensions for ESP-Hosted: a small additive message channel that
+lets a host MCU running an AVB stack make the Wi-Fi radio calls on its
+coprocessor that ESP-Hosted does not forward, without forking
+ESP-Hosted. The coprocessor runs stock ESP-Hosted with this component
+linked in.
 
-The source lives at <https://github.com/scrambletoolsllc/esp_ptp_rpc>.
+This is a third-party component from Scramble Tools, not part of
+Espressif's ESP-Hosted. It was called `esp_ptp_rpc` before version
+0.5.0; the message IDs did not change, so hosts and coprocessors built
+under either name understand each other.
+
+The source lives at <https://github.com/scrambletoolsllc/esp_hosted_avb>.
 The component is published in the ESP Component Registry
 (<https://components.espressif.com>) under the **scrambletools**
 namespace, so depend on it as:
 
 ```yaml
 dependencies:
-  scrambletools/esp_ptp_rpc: "*"
+  scrambletools/esp_hosted_avb: "*"
 ```
 
 Old github.com/scrambletools/... links redirect to the
@@ -43,28 +50,28 @@ untouched.
 ```
    Host (P4) — gPTP, AVB stack          Coprocessor (C6) — Wi-Fi radio
    ────────────────────────────         ──────────────────────────────
-   esp_hosted_send_custom_data(    →    set_vendor_ie_callback() →
-     PTP_RPC_MSG_SET_VENDOR_IE_REQ,       esp_wifi_set_vendor_ie(...)
-     packed buf)                          [installs IE in beacons]
-                                          ↓
-   handler reads ack ← PTP_RPC_MSG_SET_VENDOR_IE_ACK (esp_err_t)
+   esp_hosted_send_custom_data(      →  set_vendor_ie_callback() →
+     HOSTED_AVB_MSG_SET_VENDOR_IE_REQ,     esp_wifi_set_vendor_ie(...)
+     packed buf)                           [installs IE in beacons]
+                                           ↓
+   handler reads ack ← HOSTED_AVB_MSG_SET_VENDOR_IE_ACK (esp_err_t)
 ```
 
-Wire format is defined in `include/ptp_rpc_proto.h` (one short header,
-both sides include it). The coprocessor-side handler in
-`ptp_custom_rpc.c` registers itself at startup via a `__attribute__
+Wire format is defined in `include/hosted_avb_proto.h` (one short
+header, both sides include it). The coprocessor-side handler in
+`hosted_avb.c` registers itself at startup via a `__attribute__
 ((constructor))` so the coprocessor application does not need to call
-`ptp_custom_rpc_init()` from `app_main` — it just works once this
+`hosted_avb_init()` from `app_main` — it just works once this
 component is linked in.
 
 ## Messages implemented
 
 | ID | Name | Direction | Payload |
 | --- | --- | --- | --- |
-| `0x50545001` | `PTP_RPC_MSG_SET_VENDOR_IE_REQ` | host → coprocessor | 4-byte header + full `vendor_ie_data_t` buffer |
-| `0x50545002` | `PTP_RPC_MSG_SET_VENDOR_IE_ACK` | coprocessor → host | `int32_t esp_err_t` |
-| `0x50545003` | `PTP_RPC_MSG_ASSOCIATIONS_REQ` | host → coprocessor | `uint8_t` version |
-| `0x50545004` | `PTP_RPC_MSG_ASSOCIATIONS` | coprocessor → host | `ptp_rpc_associations_t` |
+| `0x50545001` | `HOSTED_AVB_MSG_SET_VENDOR_IE_REQ` | host → coprocessor | 4-byte header + full `vendor_ie_data_t` buffer |
+| `0x50545002` | `HOSTED_AVB_MSG_SET_VENDOR_IE_ACK` | coprocessor → host | `int32_t esp_err_t` |
+| `0x50545003` | `HOSTED_AVB_MSG_ASSOCIATIONS_REQ` | host → coprocessor | `uint8_t` version |
+| `0x50545004` | `HOSTED_AVB_MSG_ASSOCIATIONS` | coprocessor → host | `hosted_avb_associations_t` |
 
 `ASSOCIATIONS` lists the stations associated with the coprocessor's
 access point, with a random per-boot `radio_boot` and a `generation`
@@ -76,8 +83,8 @@ The list follows the hooks that `esp-hosted-association-lifecycle.patch`
 adds to the coprocessor's esp-hosted; the `LIFECYCLE` flag says they
 are live. Without the patch the flag stays clear and `esp_ptp` goes by
 the host's own association events. Other coprocessor components can
-follow the same list through the weak `ptp_rpc_associations_changed`
-and `ptp_rpc_associations_forwarded` hooks.
+follow the same list through the weak `hosted_avb_associations_changed`
+and `hosted_avb_associations_forwarded` hooks.
 
 `0x5054_5000` (`"PTP\0"`) is the message-ID base; the low byte is the
 opcode. Reserved for future expansion (e.g. FTM-frame Vendor IE
@@ -91,10 +98,10 @@ Add the dependency to your project's `main/idf_component.yml`:
 
 ```yaml
 dependencies:
-  scrambletools/esp_ptp_rpc: "*"
+  scrambletools/esp_hosted_avb: "*"
 ```
 
-Then `#include "ptp_rpc_proto.h"` and call
+Then `#include "hosted_avb_proto.h"` and call
 `esp_hosted_send_custom_data()` with the message IDs above. Most
 host-side consumers will not call this component directly —
 `esp_ptp/ptp_beacon_ie.c` is the canonical user and handles the host
@@ -106,7 +113,7 @@ The coprocessor build also adds this component (e.g. via a stub
 manifest in `components/`) and additionally enables the handler:
 
 ```
-CONFIG_PTP_RPC_BUILD_COPROCESSOR_HANDLER=y
+CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER=y
 CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 ```
 

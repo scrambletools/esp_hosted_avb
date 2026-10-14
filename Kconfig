@@ -1,17 +1,17 @@
-menu "ESP-PTP RPC"
+menu "ESP-Hosted AVB"
 
-config PTP_RPC_BUILD_COPROCESSOR_HANDLER
-    bool "Build coprocessor-side PTP custom-RPC handler"
+config HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
+    bool "Build the coprocessor-side handler"
     default n
     help
         Compile the coprocessor-side handler that bridges
-        PTP_RPC_MSG_SET_VENDOR_IE_REQ from the host to a local
+        HOSTED_AVB_MSG_SET_VENDOR_IE_REQ from the host to a local
         esp_wifi_set_vendor_ie() call, and reports the access point's
-        associations to the host (PTP_RPC_MSG_ASSOCIATIONS).
+        associations to the host (HOSTED_AVB_MSG_ASSOCIATIONS).
 
         Enable on a coprocessor running the ESP-Hosted peer-data-transfer
         framework (requires CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER
         on the coprocessor). Leave disabled on hosts; the host only
-        needs the wire-format header from include/ptp_rpc_proto.h.
+        needs the wire-format header from include/hosted_avb_proto.h.
 
 endmenu

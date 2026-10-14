@@ -1,12 +1,12 @@
-# esp_ptp_rpc — see README.md.
+# esp_hosted_avb — see README.md.
 #
 # Always exports the wire-format header. The coprocessor-side handler
-# is gated on CONFIG_PTP_RPC_BUILD_COPROCESSOR_HANDLER so host-side
+# is gated on CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER so host-side
 # consumers don't drag in esp_wifi.
 
 set(srcs "")
-if(CONFIG_PTP_RPC_BUILD_COPROCESSOR_HANDLER)
-  list(APPEND srcs "ptp_custom_rpc.c")
+if(CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER)
+  list(APPEND srcs "hosted_avb.c")
 endif()
 
 # PRIV_REQUIRES must be unconditional: IDF resolves component deps

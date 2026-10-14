@@ -2,7 +2,7 @@
  * Copyright 2026 Scramble Tools
  * License: MIT
  *
- * PTP custom-RPC wire format. See README.md for rationale and the
+ * esp_hosted_avb wire format. See README.md for rationale and the
  * end-to-end host ↔ coprocessor flow.
  */
 
@@ -10,15 +10,17 @@
 
 #include <stdint.h>
 
-/* Msg-ID base "PTP\0" (0x50545000); low byte is the opcode.
+/* Msg-ID base "PTP\0" (0x50545000); low byte is the opcode. The base
+ * dates from the component's earlier name, esp_ptp_rpc, and stays so
+ * hosts and coprocessors built under either name understand each other.
  * 0xFFFFFFFF is reserved by peer_data_transfer as "invalid". */
-#define PTP_RPC_MSG_BASE              0x50545000U
-#define PTP_RPC_MSG_SET_VENDOR_IE_REQ (PTP_RPC_MSG_BASE | 0x01U)
-#define PTP_RPC_MSG_SET_VENDOR_IE_ACK (PTP_RPC_MSG_BASE | 0x02U)
-#define PTP_RPC_MSG_ASSOCIATIONS_REQ  (PTP_RPC_MSG_BASE | 0x03U)
-#define PTP_RPC_MSG_ASSOCIATIONS      (PTP_RPC_MSG_BASE | 0x04U)
+#define HOSTED_AVB_MSG_BASE                0x50545000U
+#define HOSTED_AVB_MSG_SET_VENDOR_IE_REQ   (HOSTED_AVB_MSG_BASE | 0x01U)
+#define HOSTED_AVB_MSG_SET_VENDOR_IE_ACK   (HOSTED_AVB_MSG_BASE | 0x02U)
+#define HOSTED_AVB_MSG_ASSOCIATIONS_REQ    (HOSTED_AVB_MSG_BASE | 0x03U)
+#define HOSTED_AVB_MSG_ASSOCIATIONS        (HOSTED_AVB_MSG_BASE | 0x04U)
 
-/* Vendor IE constants shared between host marshaller, coprocessor RPC
+/* Vendor IE constants shared between host marshaller, coprocessor
  * handler, and STA parser.
  *
  * Beacon time element (AVB Wireless §2.4.1): OUI 8C:1F:64, type 0x36,
@@ -50,13 +52,13 @@ typedef struct __attribute__((packed)) {
   uint8_t type;     /* wifi_vendor_ie_type_t */
   uint8_t idx;      /* wifi_vendor_ie_id_t */
   uint8_t reserved;
-} ptp_rpc_set_vendor_ie_t;
+} hosted_avb_set_vendor_ie_t;
 
 /* SET_VENDOR_IE_ACK wire layout. peer_data_transfer confirms only
  * transport delivery, so the call-level esp_err_t comes back here. */
 typedef struct __attribute__((packed)) {
   int32_t esp_err;
-} ptp_rpc_set_vendor_ie_ack_t;
+} hosted_avb_set_vendor_ie_ack_t;
 
 /* ASSOCIATIONS wire layout: the stations associated with the
  * coprocessor's access point, sent after each join, leave and AP stop
@@ -69,9 +71,9 @@ typedef struct __attribute__((packed)) {
  * patch); until then the list cannot be trusted and the host goes by
  * its own events. The coprocessor registers two custom message handlers
  * for this component. */
-#define PTP_RPC_ASSOCIATIONS_VERSION        1
-#define PTP_RPC_ASSOCIATIONS_MAX            16
-#define PTP_RPC_ASSOCIATIONS_FLAG_LIFECYCLE 0x01
+#define HOSTED_AVB_ASSOCIATIONS_VERSION        1
+#define HOSTED_AVB_ASSOCIATIONS_MAX            16
+#define HOSTED_AVB_ASSOCIATIONS_FLAG_LIFECYCLE 0x01
 
 typedef struct __attribute__((packed)) {
   uint8_t version;
@@ -80,5 +82,5 @@ typedef struct __attribute__((packed)) {
   uint8_t reserved;
   uint32_t radio_boot;
   uint32_t generation;
-  uint8_t macs[PTP_RPC_ASSOCIATIONS_MAX][6];
-} ptp_rpc_associations_t;
+  uint8_t macs[HOSTED_AVB_ASSOCIATIONS_MAX][6];
+} hosted_avb_associations_t;

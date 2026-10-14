@@ -6,8 +6,9 @@ config HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
     help
         Compile the coprocessor-side handler that bridges
         HOSTED_AVB_MSG_SET_VENDOR_IE_REQ from the host to a local
-        esp_wifi_set_vendor_ie() call, and reports the access point's
-        associations to the host (HOSTED_AVB_MSG_ASSOCIATIONS).
+        esp_wifi_set_vendor_ie() call, reports the access point's
+        associations to the host (HOSTED_AVB_MSG_ASSOCIATIONS), and turns
+        802.11b rates on or off (HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ).
 
         Enable on a coprocessor running the ESP-Hosted peer-data-transfer
         framework (requires CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER

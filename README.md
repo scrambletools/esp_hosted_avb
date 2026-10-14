@@ -35,7 +35,9 @@ one is `esp_wifi_set_vendor_ie()` — required to publish IEEE
 
 The host's local `libnet80211` has no radio behind it, so calling
 `esp_wifi_set_vendor_ie()` from host code is a silent no-op — beacons
-go out with zero Vendor IE bytes from our OUI.
+go out with zero Vendor IE bytes from our OUI. The same holds for
+`esp_wifi_config_11b_rate()`, which keeps an AP's beacons and
+management frames off 1 Mbps, and the AP's association list.
 
 Rather than forking ESP-Hosted, this component uses the upstream's
 own additive escape hatch: the **peer_data_transfer / Custom RPC**
@@ -72,6 +74,8 @@ component is linked in.
 | `0x50545002` | `HOSTED_AVB_MSG_SET_VENDOR_IE_ACK` | coprocessor → host | `int32_t esp_err_t` |
 | `0x50545003` | `HOSTED_AVB_MSG_ASSOCIATIONS_REQ` | host → coprocessor | `uint8_t` version |
 | `0x50545004` | `HOSTED_AVB_MSG_ASSOCIATIONS` | coprocessor → host | `hosted_avb_associations_t` |
+| `0x50545005` | `HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ` | host → coprocessor | `hosted_avb_config_11b_rate_t` |
+| `0x50545006` | `HOSTED_AVB_MSG_CONFIG_11B_RATE_ACK` | coprocessor → host | `int32_t esp_err_t` |
 
 `ASSOCIATIONS` lists the stations associated with the coprocessor's
 access point, with a random per-boot `radio_boot` and a `generation`
@@ -85,6 +89,18 @@ are live. Without the patch the flag stays clear and `esp_ptp` goes by
 the host's own association events. Other coprocessor components can
 follow the same list through the weak `hosted_avb_associations_changed`
 and `hosted_avb_associations_forwarded` hooks.
+
+`CONFIG_11B_RATE_REQ` calls `esp_wifi_config_11b_rate()` on the
+coprocessor, which esp-hosted does not forward. With 802.11b off, an
+access point sends its beacons, management and group addressed frames
+at 6 Mbps OFDM instead of 1 Mbps DSSS; on the bench that cut
+management airtime from about 30 to 5 ms a second. The radio accepts
+the call only between `esp_wifi_init()` and `esp_wifi_start()`, so the
+host sends it after `esp_wifi_set_config()` and waits for the ACK
+before starting Wi-Fi. A coprocessor without this message never
+answers; the host should time out and carry on. Setting the protocol to
+802.11g/n through esp-hosted does not do this: the beacons stay at
+1 Mbps.
 
 `0x5054_5000` (`"PTP\0"`) is the message-ID base; the low byte is the
 opcode. Reserved for future expansion (e.g. FTM-frame Vendor IE
@@ -104,8 +120,9 @@ dependencies:
 Then `#include "hosted_avb_proto.h"` and call
 `esp_hosted_send_custom_data()` with the message IDs above. Most
 host-side consumers will not call this component directly —
-`esp_ptp/ptp_beacon_ie.c` is the canonical user and handles the host
-side of the protocol on behalf of the AVB stack.
+`esp_ptp` handles the vendor IE and association messages on behalf of
+the AVB stack, and ESP-AVB-Bridge sends `CONFIG_11B_RATE_REQ` before it
+starts its access point.
 
 ### Coprocessor side
 
@@ -118,7 +135,7 @@ CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 ```
 
 The handler self-registers at startup; the coprocessor app does not
-need to know about this component. It takes two of the coprocessor's
+need to know about this component. It takes three of the coprocessor's
 custom message handlers, and `CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS`
 defaults to 3, so raise it when other components register their own: a
 component that checks its registration otherwise aborts at boot, and an
@@ -126,10 +143,10 @@ SDIO coprocessor that cannot boot cannot take an SDIO update either.
 
 ## Status
 
-Vendor-IE install and association reporting are live. Future
-opcodes will land here as the AVB-over-Wi-Fi plan needs them; the
-wire format is versioned only via opcode additions to keep host and
-coprocessor sides loosely coupled.
+Vendor-IE install, association reporting and the 802.11b switch are
+live. Future opcodes will land here as the AVB-over-Wi-Fi plan needs
+them; the wire format is versioned only via opcode additions to keep
+host and coprocessor sides loosely coupled.
 
 ## License
 

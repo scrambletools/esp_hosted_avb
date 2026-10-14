@@ -19,6 +19,8 @@
 #define HOSTED_AVB_MSG_SET_VENDOR_IE_ACK   (HOSTED_AVB_MSG_BASE | 0x02U)
 #define HOSTED_AVB_MSG_ASSOCIATIONS_REQ    (HOSTED_AVB_MSG_BASE | 0x03U)
 #define HOSTED_AVB_MSG_ASSOCIATIONS        (HOSTED_AVB_MSG_BASE | 0x04U)
+#define HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ (HOSTED_AVB_MSG_BASE | 0x05U)
+#define HOSTED_AVB_MSG_CONFIG_11B_RATE_ACK (HOSTED_AVB_MSG_BASE | 0x06U)
 
 /* Vendor IE constants shared between host marshaller, coprocessor
  * handler, and STA parser.
@@ -60,6 +62,23 @@ typedef struct __attribute__((packed)) {
   int32_t esp_err;
 } hosted_avb_set_vendor_ie_ack_t;
 
+/* CONFIG_11B_RATE_REQ wire layout: esp_wifi_config_11b_rate() on the
+ * coprocessor, which esp-hosted does not forward. With 802.11b off the
+ * AP sends beacons, management and group addressed frames at 6 Mbps
+ * OFDM instead of 1 Mbps DSSS. The radio accepts it only between
+ * esp_wifi_init() and esp_wifi_start(), so the host waits for the ACK
+ * before it starts Wi-Fi. */
+typedef struct __attribute__((packed)) {
+  uint8_t ifx;      /* wifi_interface_t */
+  uint8_t disable;  /* 1 = 802.11b rates off */
+  uint8_t reserved[2];
+} hosted_avb_config_11b_rate_t;
+
+/* CONFIG_11B_RATE_ACK wire layout: the call's esp_err_t. */
+typedef struct __attribute__((packed)) {
+  int32_t esp_err;
+} hosted_avb_config_11b_rate_ack_t;
+
 /* ASSOCIATIONS wire layout: the stations associated with the
  * coprocessor's access point, sent after each join, leave and AP stop
  * has been forwarded to the host, and in answer to ASSOCIATIONS_REQ
@@ -69,8 +88,7 @@ typedef struct __attribute__((packed)) {
  * change; neither is ever 0. LIFECYCLE is set once the coprocessor's
  * esp-hosted reports association changes (the association lifecycle
  * patch); until then the list cannot be trusted and the host goes by
- * its own events. The coprocessor registers two custom message handlers
- * for this component. */
+ * its own events. */
 #define HOSTED_AVB_ASSOCIATIONS_VERSION        1
 #define HOSTED_AVB_ASSOCIATIONS_MAX            16
 #define HOSTED_AVB_ASSOCIATIONS_FLAG_LIFECYCLE 0x01

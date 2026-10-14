@@ -44,10 +44,15 @@ static const char *TAG = "hosted_avb";
 #define REPLY_TASK_STACK 3072
 #define REPLY_TASK_PRIORITY 5
 
+/* An ACK carries only the call's esp_err_t; ASSOCIATIONS carries none. */
 typedef struct {
   uint32_t msg_id;
-  hosted_avb_set_vendor_ie_ack_t ack;
+  int32_t esp_err;
 } hosted_avb_reply_t;
+
+_Static_assert(sizeof(hosted_avb_set_vendor_ie_ack_t) == sizeof(int32_t) &&
+                   sizeof(hosted_avb_config_11b_rate_ack_t) == sizeof(int32_t),
+               "an ACK is the esp_err_t alone");
 
 static QueueHandle_t s_replies;
 static atomic_bool s_associations_queued;
@@ -127,9 +132,10 @@ static void reply_task(void *arg) {
       continue;
     }
     esp_err_t sent = esp_hosted_send_custom_data(
-        reply.msg_id, (const uint8_t *)&reply.ack, sizeof(reply.ack));
+        reply.msg_id, (const uint8_t *)&reply.esp_err, sizeof(reply.esp_err));
     if (sent != ESP_OK) {
-      ESP_LOGE(TAG, "SET_VENDOR_IE_ACK send failed: %s", esp_err_to_name(sent));
+      ESP_LOGE(TAG, "ACK 0x%08lx send failed: %s", (unsigned long)reply.msg_id,
+               esp_err_to_name(sent));
     }
   }
 }
@@ -140,12 +146,11 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
   (void)user;
 
   hosted_avb_reply_t reply = {.msg_id = HOSTED_AVB_MSG_SET_VENDOR_IE_ACK,
-                           .ack = {.esp_err = ESP_OK}};
-  hosted_avb_set_vendor_ie_ack_t *const ack = &reply.ack;
+                           .esp_err = ESP_OK};
 
   if (data == NULL || data_len < sizeof(hosted_avb_set_vendor_ie_t)) {
     ESP_LOGW(TAG, "SET_VENDOR_IE_REQ too short: %zu", data_len);
-    ack->esp_err = ESP_ERR_INVALID_SIZE;
+    reply.esp_err = ESP_ERR_INVALID_SIZE;
     goto send_ack;
   }
 
@@ -168,7 +173,7 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
   /* vendor_ie_data_t needs at least its 6-byte fixed header. */
   if (hdr->enable && vnd_ie_len < 6) {
     ESP_LOGW(TAG, "SET_VENDOR_IE_REQ vnd_ie too short: %zu", vnd_ie_len);
-    ack->esp_err = ESP_ERR_INVALID_SIZE;
+    reply.esp_err = ESP_ERR_INVALID_SIZE;
     goto send_ack;
   }
 
@@ -219,11 +224,11 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
     (void)esp_wifi_set_vendor_ie(false, (wifi_vendor_ie_type_t)hdr->type,
                                  (wifi_vendor_ie_id_t)hdr->idx, NULL);
   }
-  ack->esp_err = esp_wifi_set_vendor_ie((bool)hdr->enable,
-                                       (wifi_vendor_ie_type_t)hdr->type,
-                                       (wifi_vendor_ie_id_t)hdr->idx, vnd_ie);
-  if (ack->esp_err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_wifi_set_vendor_ie: %s", esp_err_to_name(ack->esp_err));
+  reply.esp_err = esp_wifi_set_vendor_ie((bool)hdr->enable,
+                                        (wifi_vendor_ie_type_t)hdr->type,
+                                        (wifi_vendor_ie_id_t)hdr->idx, vnd_ie);
+  if (reply.esp_err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_wifi_set_vendor_ie: %s", esp_err_to_name(reply.esp_err));
   }
   /* Periodic-publish path: no INFO log on success — would spam at the
    * Sync interval (8 Hz for gPTP default). Errors still log. */
@@ -334,6 +339,30 @@ static void associations_request_callback(uint32_t msg_id,
   queue_associations();
 }
 
+static void config_11b_rate_callback(uint32_t msg_id, const uint8_t *data,
+                                     size_t data_len, void *user) {
+  (void)msg_id;
+  (void)user;
+  hosted_avb_reply_t reply = {.msg_id = HOSTED_AVB_MSG_CONFIG_11B_RATE_ACK};
+  if (data == NULL || data_len < sizeof(hosted_avb_config_11b_rate_t)) {
+    ESP_LOGW(TAG, "CONFIG_11B_RATE_REQ too short: %zu", data_len);
+    reply.esp_err = ESP_ERR_INVALID_SIZE;
+  } else {
+    const hosted_avb_config_11b_rate_t *request =
+        (const hosted_avb_config_11b_rate_t *)data;
+    reply.esp_err = esp_wifi_config_11b_rate((wifi_interface_t)request->ifx,
+                                             request->disable != 0);
+    if (reply.esp_err == ESP_OK) {
+      ESP_LOGI(TAG, "802.11b rates %s on interface %u",
+               request->disable ? "off" : "on", request->ifx);
+    } else {
+      ESP_LOGE(TAG, "esp_wifi_config_11b_rate: %s",
+               esp_err_to_name(reply.esp_err));
+    }
+  }
+  (void)queue_reply(&reply);
+}
+
 esp_err_t hosted_avb_init(void) {
   esp_err_t r = esp_hosted_register_custom_callback(
       HOSTED_AVB_MSG_SET_VENDOR_IE_REQ, set_vendor_ie_callback, NULL);
@@ -345,6 +374,13 @@ esp_err_t hosted_avb_init(void) {
                                           associations_request_callback, NULL);
   if (r != ESP_OK) {
     ESP_LOGE(TAG, "register ASSOCIATIONS_REQ failed: %s", esp_err_to_name(r));
+    return r;
+  }
+  r = esp_hosted_register_custom_callback(HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ,
+                                          config_11b_rate_callback, NULL);
+  if (r != ESP_OK) {
+    ESP_LOGE(TAG, "register CONFIG_11B_RATE_REQ failed: %s",
+             esp_err_to_name(r));
     return r;
   }
   ESP_LOGI(TAG, "handlers registered (msg_id base 0x%08x)",

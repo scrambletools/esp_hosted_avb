@@ -11,8 +11,8 @@ config HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
         802.11b rates on or off (HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ).
 
         Enable on a coprocessor running the ESP-Hosted peer-data-transfer
-        framework (requires CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER
-        on the coprocessor). Leave disabled on hosts; the host only
-        needs the wire-format header from include/hosted_avb_proto.h.
+        framework (CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA on esp-hosted 3.x,
+        CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER on 2.x). Leave
+        disabled on hosts; the host needs only the headers.
 
 endmenu

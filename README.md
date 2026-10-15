@@ -60,11 +60,13 @@ untouched.
 ```
 
 Wire format is defined in `include/hosted_avb_proto.h` (one short
-header, both sides include it). The coprocessor-side handler in
-`hosted_avb.c` registers itself at startup via a `__attribute__
-((constructor))` so the coprocessor application does not need to call
-`hosted_avb_init()` from `app_main` — it just works once this
-component is linked in.
+header, both sides include it). `include/hosted_avb_peer.h` wraps the
+peer data calls of whichever esp-hosted a side is built with, 2.x or
+3.x, host or coprocessor. The coprocessor-side handler in
+`hosted_avb.c` registers itself at startup, from a constructor on
+esp-hosted 2.x and as an esp-hosted feature on 3.x, so the coprocessor
+application does not need to call `hosted_avb_init()` from `app_main`;
+it just works once this component is linked in.
 
 ## Messages implemented
 
@@ -83,10 +85,12 @@ that advances with every change. The coprocessor sends it after each
 join, leave and AP stop has been forwarded to the host, and in answer
 to `ASSOCIATIONS_REQ`. `esp_ptp` reconciles its gPTP peers to it, so
 the host sends Announce and Signaling only to stations the radio has.
-The list follows the hooks that `esp-hosted-association-lifecycle.patch`
-adds to the coprocessor's esp-hosted; the `LIFECYCLE` flag says they
-are live. Without the patch the flag stays clear and `esp_ptp` goes by
-the host's own association events. Other coprocessor components can
+On esp-hosted 3.x the list follows the coprocessor's Wi-Fi events: the
+raw AP event updates it and the report goes out once esp-hosted has
+reposted the event for the host. On 2.x it follows the hooks that
+ESP-AVB-Bridge's `esp-hosted-association-lifecycle.patch` adds. The
+`LIFECYCLE` flag says the list is live; without it `esp_ptp` goes by the
+host's own association events. Other coprocessor components can
 follow the same list through the weak `hosted_avb_associations_changed`
 and `hosted_avb_associations_forwarded` hooks.
 
@@ -117,8 +121,8 @@ dependencies:
   scrambletools/esp_hosted_avb: "*"
 ```
 
-Then `#include "hosted_avb_proto.h"` and call
-`esp_hosted_send_custom_data()` with the message IDs above. Most
+Then `#include "hosted_avb_proto.h"` and `"hosted_avb_peer.h"`, and
+call `hosted_avb_peer_send()` with the message IDs above. Most
 host-side consumers will not call this component directly —
 `esp_ptp` handles the vendor IE and association messages on behalf of
 the AVB stack, and ESP-AVB-Bridge sends `CONFIG_11B_RATE_REQ` before it
@@ -126,20 +130,24 @@ starts its access point.
 
 ### Coprocessor side
 
-The coprocessor build also adds this component (e.g. via a stub
-manifest in `components/`) and additionally enables the handler:
+The coprocessor build also adds this component and enables the handler
+and esp-hosted's peer data:
 
 ```
 CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER=y
+# esp-hosted 3.x
+CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA=y
+# esp-hosted 2.x
 CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 ```
 
 The handler self-registers at startup; the coprocessor app does not
 need to know about this component. It takes three of the coprocessor's
-custom message handlers, and `CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS`
-defaults to 3, so raise it when other components register their own: a
-component that checks its registration otherwise aborts at boot, and an
-SDIO coprocessor that cannot boot cannot take an SDIO update either.
+custom message handlers. 3.x has eight; on 2.x
+`CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS` defaults to 3, so raise it
+when other components register their own: a component that checks its
+registration otherwise aborts at boot, and an SDIO coprocessor that
+cannot boot cannot take an SDIO update either.
 
 ## Status
 

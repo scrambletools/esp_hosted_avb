@@ -40,19 +40,17 @@ go out with zero Vendor IE bytes from our OUI. The same holds for
 management frames off 1 Mbps, and the AP's association list.
 
 Rather than forking ESP-Hosted, this component uses the upstream's
-own additive escape hatch: the **peer_data_transfer / Custom RPC**
-framework. The host sends a packed buffer via
-`esp_hosted_send_custom_data(msg_id, ...)`; the coprocessor's
+own additive escape hatch: its **peer data** feature. The host sends a
+packed buffer via `hosted_avb_peer_send(msg_id, ...)`; the coprocessor's
 registered callback unpacks and dispatches to the matching
-`esp_wifi_*` call locally on the C6. Managed-component sources are
-untouched.
+`esp_wifi_*` call locally on the C6.
 
 ## How it works
 
 ```
    Host (P4) — gPTP, AVB stack          Coprocessor (C6) — Wi-Fi radio
    ────────────────────────────         ──────────────────────────────
-   esp_hosted_send_custom_data(      →  set_vendor_ie_callback() →
+   hosted_avb_peer_send(             →  set_vendor_ie_callback() →
      HOSTED_AVB_MSG_SET_VENDOR_IE_REQ,     esp_wifi_set_vendor_ie(...)
      packed buf)                           [installs IE in beacons]
                                            ↓
@@ -60,13 +58,12 @@ untouched.
 ```
 
 Wire format is defined in `include/hosted_avb_proto.h` (one short
-header, both sides include it). `include/hosted_avb_peer.h` wraps the
-peer data calls of whichever esp-hosted a side is built with, 2.x or
-3.x, host or coprocessor. The coprocessor-side handler in
-`hosted_avb.c` registers itself at startup, from a constructor on
-esp-hosted 2.x and as an esp-hosted feature on 3.x, so the coprocessor
-application does not need to call `hosted_avb_init()` from `app_main`;
-it just works once this component is linked in.
+header, both sides include it). `include/hosted_avb_peer.h` wraps
+esp-hosted's peer data calls on the host and the coprocessor. The
+coprocessor-side handler in `hosted_avb.c` registers itself at startup
+as an esp-hosted feature, so the coprocessor application does not need
+to call `hosted_avb_init()` from `app_main`; it just works once this
+component is linked in.
 
 ## Messages implemented
 
@@ -85,14 +82,13 @@ that advances with every change. The coprocessor sends it after each
 join, leave and AP stop has been forwarded to the host, and in answer
 to `ASSOCIATIONS_REQ`. `esp_ptp` reconciles its gPTP peers to it, so
 the host sends Announce and Signaling only to stations the radio has.
-On esp-hosted 3.x the list follows the coprocessor's Wi-Fi events: the
-raw AP event updates it and the report goes out once esp-hosted has
-reposted the event for the host. On 2.x it follows the hooks that
-ESP-AVB-Bridge's `esp-hosted-association-lifecycle.patch` adds. The
-`LIFECYCLE` flag says the list is live; without it `esp_ptp` goes by the
-host's own association events. Other coprocessor components can
-follow the same list through the weak `hosted_avb_associations_changed`
-and `hosted_avb_associations_forwarded` hooks.
+The list follows the coprocessor's Wi-Fi events: the raw AP event
+updates it and the report goes out once esp-hosted has reposted the
+event for the host. The `LIFECYCLE` flag says the list is live; without
+it `esp_ptp` goes by the host's own association events. Other
+coprocessor components can follow the same list through the weak
+`hosted_avb_associations_changed` and `hosted_avb_associations_forwarded`
+hooks.
 
 `CONFIG_11B_RATE_REQ` calls `esp_wifi_config_11b_rate()` on the
 coprocessor, which esp-hosted does not forward. With 802.11b off, an
@@ -135,19 +131,15 @@ and esp-hosted's peer data:
 
 ```
 CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER=y
-# esp-hosted 3.x
 CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA=y
-# esp-hosted 2.x
-CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER=y
 ```
 
 The handler self-registers at startup; the coprocessor app does not
 need to know about this component. It takes three of the coprocessor's
-custom message handlers. 3.x has eight; on 2.x
-`CONFIG_ESP_HOSTED_MAX_CUSTOM_MSG_HANDLERS` defaults to 3, so raise it
-when other components register their own: a component that checks its
-registration otherwise aborts at boot, and an SDIO coprocessor that
-cannot boot cannot take an SDIO update either.
+eight peer data handlers.
+
+esp-hosted 3.x is required on both sides; version 0.6.0 was the last
+to build against 2.x.
 
 ## Status
 

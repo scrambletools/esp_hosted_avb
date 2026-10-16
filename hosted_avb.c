@@ -22,20 +22,17 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
-#if defined(CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA)
 #include "esp_event.h"
 #include "eh_cp_core.h"
 #include "eh_cp_feat_wifi_event.h"
-#endif
 
 static const char *TAG = "hosted_avb";
 
-/* Replies leave through their own task. In esp-hosted 2.x a custom-RPC
- * callback runs on the pserial task, and a send queues onto that task's
- * own request queue with no timeout: once requests back up, as under a
- * heavy station uplink, a reply sent from the callback blocks the only
- * task that drains the queue, and the coprocessor's RPC and SDIO receive
- * paths stop for good. 3.x bounds that wait but still stalls on it. */
+/* Replies leave through their own task. A send from a peer data
+ * callback waits for room in a queue that the callback's own task
+ * drains, so once requests back up, as under a heavy station uplink, a
+ * reply sent from the callback stalls the coprocessor's RPC path until
+ * that wait times out. */
 #define REPLY_QUEUE_DEPTH 8
 #define REPLY_TASK_STACK 3072
 #define REPLY_TASK_PRIORITY 5
@@ -57,8 +54,8 @@ static atomic_uint s_replies_dropped;
 static void send_associations(void);
 static void reply_task(void *arg);
 
-/* Started on first use, from a task: init runs as a constructor. A reply
- * that races the start is dropped like one that finds the queue full. */
+/* Started on first use. A reply that races the start is dropped like one
+ * that finds the queue full. */
 static bool reply_queue_ready(void) {
   static portMUX_TYPE start_lock = portMUX_INITIALIZER_UNLOCKED;
   static bool starting;
@@ -233,11 +230,10 @@ send_ack:
   (void)queue_reply(&reply);
 }
 
-/* The AP's associations. ftm_radio_association_begin runs before each
- * join, leave or AP stop is forwarded to the host, and
- * ftm_radio_association_complete after, so the list reaches the host
- * behind the event it follows. In esp-hosted 2.x the association
- * lifecycle patch calls them; in 3.x the event handlers below do. */
+/* The AP's associations. The Wi-Fi event handlers below call
+ * association_begin before each join, leave or AP stop is forwarded to
+ * the host, and association_complete after, so the list reaches the host
+ * behind the event it follows. */
 static portMUX_TYPE s_associations_lock = portMUX_INITIALIZER_UNLOCKED;
 static hosted_avb_associations_t s_associations = {
     .version = HOSTED_AVB_ASSOCIATIONS_VERSION, .generation = 1};
@@ -266,13 +262,10 @@ static void send_associations(void) {
   }
 }
 
-/* Lifecycle hooks; mac is NULL for an AP stop. Returns the new
- * generation, or 0 for an address no station can have or a full list,
- * either of which leaves the list unchanged. */
-uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined);
-void ftm_radio_association_complete(uint32_t generation, bool queued);
-
-uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
+/* mac is NULL for an AP stop. Returns the new generation, or 0 for an
+ * address no station can have or a full list, either of which leaves the
+ * list unchanged. */
+static uint32_t association_begin(const uint8_t mac[6], bool joined) {
   static const uint8_t zero_mac[6] = {0};
   if (mac != NULL && ((mac[0] & 1) || memcmp(mac, zero_mac, 6) == 0)) {
     return 0;
@@ -316,7 +309,7 @@ uint32_t ftm_radio_association_begin(const uint8_t mac[6], bool joined) {
   return generation;
 }
 
-void ftm_radio_association_complete(uint32_t generation, bool queued) {
+static void association_complete(uint32_t generation, bool queued) {
   if (hosted_avb_associations_forwarded) {
     hosted_avb_associations_forwarded(generation, queued);
   }
@@ -385,15 +378,15 @@ esp_err_t hosted_avb_init(void) {
   return ESP_OK;
 }
 
-#if defined(CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA)
-/* esp-hosted 3.x has no association hooks. Its Wi-Fi feature reposts each
+/* esp-hosted has no association hooks. Its Wi-Fi feature reposts each
  * AP join, leave and stop as an EH_CP_FEAT_WIFI_EVENT, which its RPC
  * feature forwards to the host, all on the default event loop. The raw
  * Wi-Fi event updates the list before the repost is forwarded, and the
  * repost, handled after the forwarder, queues the report behind the
- * host's event. 3.x does not say whether that event was queued, so a
- * repost counts as queued and a change whose repost never came does not.
- * Both handlers run on the event loop task, which owns the pending list. */
+ * host's event. esp-hosted does not say whether that event was queued,
+ * so a repost counts as queued and a change whose repost never came does
+ * not. Both handlers run on the event loop task, which owns the pending
+ * list. */
 #define PENDING_CHANGES_MAX 8
 
 typedef struct {
@@ -411,7 +404,7 @@ static void retire_oldest_change(bool queued) {
   pending_change_t *change = &s_pending_changes[s_pending_head];
   s_pending_head = (s_pending_head + 1) % PENDING_CHANGES_MAX;
   s_pending_count--;
-  ftm_radio_association_complete(change->generation, queued);
+  association_complete(change->generation, queued);
 }
 
 static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t event_id,
@@ -431,8 +424,8 @@ static void ap_wifi_event(void *arg, esp_event_base_t base, int32_t event_id,
   } else {
     return;
   }
-  change.generation = ftm_radio_association_begin(
-      change.ap_stop ? NULL : change.mac, change.joined);
+  change.generation =
+      association_begin(change.ap_stop ? NULL : change.mac, change.joined);
   if (s_pending_count == PENDING_CHANGES_MAX) {
     retire_oldest_change(false);
   }
@@ -472,7 +465,7 @@ static void ap_event_forwarded(void *arg, esp_event_base_t base,
   }
 }
 
-/* esp-hosted 3.x starts its features in priority order before the host
+/* esp-hosted starts its features in priority order before the host
  * can connect: peer data at 90, Wi-Fi at 200. This one follows both, so
  * its repost handler runs after the forwarder's. */
 static esp_err_t hosted_avb_start(void) {
@@ -502,12 +495,3 @@ static esp_err_t hosted_avb_start(void) {
 }
 
 EH_CP_FEAT_REGISTER(hosted_avb_start, NULL, "hosted_avb", tskNO_AFFINITY, 250);
-#else
-/* Auto-register so the coprocessor app doesn't need to call us from
- * app_main. Safe at constructor time: esp-hosted 2.x's register API lazy-
- * initializes its mutex and the dispatch table is BSS-zero. Re-calling
- * hosted_avb_init() from user code is harmless. */
-__attribute__((constructor)) static void hosted_avb_autoreg(void) {
-  (void)hosted_avb_init();
-}
-#endif

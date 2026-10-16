@@ -26,8 +26,8 @@ uint32_t hosted_avb_radio_boot(void);
 /* Optional hooks for other coprocessor components that follow the AP's
  * associations. changed runs after each join, leave or AP stop with the
  * new state, before the host is told; forwarded runs once the host's
- * notification is queued, or failed to be. Both may run in the Wi-Fi
- * event task. */
+ * notification is queued, or failed to be. Both run on the default
+ * event loop task. */
 void hosted_avb_associations_changed(
     const hosted_avb_associations_t *associations) __attribute__((weak));
 void hosted_avb_associations_forwarded(uint32_t generation, bool queued)

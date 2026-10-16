@@ -3,15 +3,13 @@
 # Always exports the wire-format header. The coprocessor-side handler
 # is gated on CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER so host-side
 # consumers don't drag in esp_wifi. The peer data calls build wherever
-# esp-hosted peer data is on: 2.x or 3.x, host or coprocessor.
+# esp-hosted peer data is on, host or coprocessor.
 
 set(srcs "")
 if(CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER)
   list(APPEND srcs "hosted_avb.c")
 endif()
-if(CONFIG_ESP_HOSTED_ENABLE_PEER_DATA_TRANSFER OR
-   CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA OR
-   CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA)
+if(CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA OR CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA)
   list(APPEND srcs "hosted_avb_peer.c")
 endif()
 
@@ -26,9 +24,8 @@ idf_component_register(
     WHOLE_ARCHIVE
 )
 
-# esp-hosted's headers, where it is a component: any 3.x build and a 2.x
-# host. A 2.x coprocessor builds it as its main component, which exports
-# none, and a station has none.
+# esp-hosted's headers, on the host and the coprocessor; a station has
+# none.
 if(srcs AND NOT CMAKE_BUILD_EARLY_EXPANSION)
   idf_build_get_property(build_components BUILD_COMPONENTS)
   if(espressif__esp_hosted IN_LIST build_components)

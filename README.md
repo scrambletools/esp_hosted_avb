@@ -11,7 +11,7 @@ Espressif's ESP-Hosted. It was called `esp_ptp_rpc` before version
 0.5.0; the message IDs did not change, so hosts and coprocessors built
 under either name understand each other.
 
-The source lives at <https://github.com/scrambletoolsllc/esp_hosted_avb>.
+The source lives at <https://github.com/scrambletools/esp_hosted_avb>.
 The component is published in the ESP Component Registry
 (<https://components.espressif.com>) under the **scrambletools**
 namespace, so depend on it as:
@@ -21,8 +21,8 @@ dependencies:
   scrambletools/esp_hosted_avb: "*"
 ```
 
-Old github.com/scrambletools/... links redirect to the
-scrambletoolsllc repos.
+Old github.com/scrambletoolsllc/... links redirect to the
+scrambletools repos.
 
 ## Why
 

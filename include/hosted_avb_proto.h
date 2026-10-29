@@ -28,10 +28,9 @@
  * Beacon time element (AVB Wireless §2.4.1): OUI 8C:1F:64, type 0x36,
  * sub-ID octets C0 06 (the MA-S 8C-1F-64-36-C plus sub-ID 0x006), then
  * the 76-byte §12.7 Follow_Up, the AP TSF (uint64_t LE µs) and an
- * optional capture bracket (uint16_t LE µs).
- *
- * FOLLOWUP (0x00) is the earlier form, the Follow_Up and AP TSF with no
- * sub-ID. Stations accept it during migration. */
+ * optional capture bracket (uint16_t LE µs). Its earlier form, type
+ * 0x00 under the bare 8C:1F:64 with no sub-ID, is retired: an MA-S
+ * holder may not truncate its block to the 24-bit prefix. */
 #define PTP_VND_IE_OUI0          0x8C
 #define PTP_VND_IE_OUI1          0x1F
 #define PTP_VND_IE_OUI2          0x64
@@ -39,7 +38,6 @@
 #define PTP_VND_IE_SUBID0                0xC0
 #define PTP_VND_IE_SUBID1_BEACON_TIME    0x06
 #define PTP_VND_IE_SUBID_LEN             2
-#define PTP_VND_IE_OUI_TYPE_FOLLOWUP     0x00
 #define PTP_VND_IE_FOLLOW_UP_LEN            76
 #define PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN  8   /* uint64_t LE µs */
 #define PTP_VND_IE_CAPTURE_BRACKET_LEN      2   /* uint16_t LE µs */

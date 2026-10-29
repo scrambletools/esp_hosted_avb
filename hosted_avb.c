@@ -176,8 +176,7 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
    * AP-TSF marker is captured atomically with the beacon carrying this
    * BTC (preciseOriginTimestamp). The host cannot read the AP TSF itself
    * (its remote esp_wifi_get_tsf_time returns -1), so only the
-   * coprocessor can supply it. The earlier FOLLOWUP form carries the TSF
-   * in its last PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN bytes. */
+   * coprocessor can supply it. */
   size_t tsf_offset = 0;
   if (hdr->enable && vnd_ie[2] == PTP_VND_IE_OUI0 &&
       vnd_ie[3] == PTP_VND_IE_OUI1 && vnd_ie[4] == PTP_VND_IE_OUI2) {
@@ -186,9 +185,6 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
         vnd_ie[6] == PTP_VND_IE_SUBID0 &&
         vnd_ie[7] == PTP_VND_IE_SUBID1_BEACON_TIME) {
       tsf_offset = 6 + PTP_VND_IE_SUBID_LEN + PTP_VND_IE_FOLLOW_UP_LEN;
-    } else if (vnd_ie[5] == PTP_VND_IE_OUI_TYPE_FOLLOWUP &&
-               vnd_ie_len >= 6 + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN) {
-      tsf_offset = vnd_ie_len - PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN;
     }
   }
   if (tsf_offset != 0 &&

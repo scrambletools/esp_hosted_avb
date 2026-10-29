@@ -1,4 +1,4 @@
-version: "0.7.1"
+version: "0.7.2"
 description: "AVB extensions for ESP-Hosted: coprocessor Wi-Fi calls it does not forward"
 url: "https://github.com/scrambletools/esp_hosted_avb"
 license: "MIT"

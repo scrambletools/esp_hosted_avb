@@ -42,6 +42,17 @@ config HOSTED_AVB_CLOCK_LINK_PERIOD_MS
     range 50 10000
     default 250
 
+config HOSTED_AVB_WIFI_TIME
+    bool "Receive the coprocessor's Wi-Fi time"
+    depends on HOSTED_AVB_CLOCK_LINK && ESP_HOSTED_HOST
+    default n
+    help
+        Host side of a coprocessor station's FTM time engine: each
+        measurement it sends (gPTP time against the coprocessor's
+        clock-link timer) is put on the host's PTP clock through the clock
+        link. Logs the difference from the host clock every 10 s (WIFITIME
+        lines). Start it with hosted_avb_wifi_time_start().
+
 config HOSTED_AVB_COPROCESSOR_PROJECT
     string "Coprocessor firmware project name"
     default "avb_bridge_coprocessor"

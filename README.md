@@ -78,6 +78,7 @@ component is linked in.
 | `0x50545007` | `HOSTED_AVB_MSG_CLOCK_LINK_ARM` | host → coprocessor | `hosted_avb_clock_link_arm_t` |
 | `0x50545008` | `HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK` | coprocessor → host | `hosted_avb_clock_link_arm_t` |
 | `0x50545009` | `HOSTED_AVB_MSG_CLOCK_LINK_EDGE` | coprocessor → host | `hosted_avb_clock_link_edge_t` |
+| `0x5054500A` | `HOSTED_AVB_MSG_WIFI_TIME` | coprocessor → host | `hosted_avb_wifi_time_t` |
 
 `ASSOCIATIONS` lists the stations associated with the coprocessor's
 access point, with a random per-boot `radio_boot` and a `generation`
@@ -118,6 +119,22 @@ clock (`hosted_avb_clock_link_latest()`), and the host logs a fit every
 10 s. On the bench, at 4 edges a second, the fit left 25 to 32 ns rms
 (about 100 ns peak to peak over 8 s), close to the 25 ns timer and 40 ns
 PTP clock steps.
+
+With the link running, `hosted_avb_clock_link_to_host()` puts a
+coprocessor timer time (`hosted_avb_clock_link_coprocessor_read()` on
+the coprocessor gives readings in it) on the host's PTP clock, through a
+fit over the last 32 edges.
+
+`WIFI_TIME` carries one FTM session of a coprocessor station's time
+engine (ESP-AVB-Bridge's `ftm_time_engine`): gPTP time from the
+responder's Follow_Up against the coprocessor's clock-link timer, or why
+the session gave none. The host side (`CONFIG_HOSTED_AVB_WIFI_TIME`,
+`hosted_avb_wifi_time_start()`) puts each on the host's PTP clock and
+logs, every 10 s, how far it sat from that clock (`WIFITIME`) and the
+sessions by measurements and Follow_Ups received (`WIFISESS`). On a host
+synchronized by wire that difference is the transfer's error: on the
+bench, one Wi-Fi hop, about 290 ns standard deviation with a mean within
+50 ns, 98.5% of sessions measured.
 
 `0x5054_5000` (`"PTP\0"`) is the message-ID base; the low byte is the
 opcode. Reserved for future expansion (e.g. FTM-frame Vendor IE

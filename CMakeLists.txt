@@ -18,6 +18,9 @@ endif()
 if(CONFIG_HOSTED_AVB_CLOCK_LINK)
   list(APPEND srcs "hosted_avb_clock_link.c")
 endif()
+if(CONFIG_HOSTED_AVB_WIFI_TIME)
+  list(APPEND srcs "hosted_avb_wifi_time.c")
+endif()
 
 # PRIV_REQUIRES must be unconditional: IDF resolves component deps
 # before CONFIG_* is populated, so gating this on Kconfig yields an

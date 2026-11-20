@@ -24,6 +24,7 @@
 #define HOSTED_AVB_MSG_CLOCK_LINK_ARM      (HOSTED_AVB_MSG_BASE | 0x07U)
 #define HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK  (HOSTED_AVB_MSG_BASE | 0x08U)
 #define HOSTED_AVB_MSG_CLOCK_LINK_EDGE     (HOSTED_AVB_MSG_BASE | 0x09U)
+#define HOSTED_AVB_MSG_WIFI_TIME           (HOSTED_AVB_MSG_BASE | 0x0AU)
 
 /* Vendor IE constants shared between host marshaller, coprocessor
  * handler, and STA parser.
@@ -135,3 +136,56 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(hosted_avb_clock_link_arm_t) == 16, "clock link arm");
 _Static_assert(sizeof(hosted_avb_clock_link_edge_t) == 48, "clock link edge");
+
+/* Wi-Fi time (coprocessor to host): one per FTM session of a coprocessor
+ * station's time engine. An OBSERVED one pairs the coprocessor's
+ * clock-link timer (cp_ns) with gPTP time at the same instant, taken from
+ * the responder's Follow_Up and the measured round trip. */
+#define HOSTED_AVB_WIFI_TIME_VERSION 1
+
+typedef enum {
+  HOSTED_AVB_WIFI_TIME_OBSERVED = 0,
+  HOSTED_AVB_WIFI_TIME_NO_REPORT,    /* the session ended with no report */
+  HOSTED_AVB_WIFI_TIME_FAILED,       /* a report with a failure status */
+  HOSTED_AVB_WIFI_TIME_NO_FOLLOW_UP, /* under two measurements had one */
+  HOSTED_AVB_WIFI_TIME_REJECTED,     /* failed a rate, span or RTT check */
+  HOSTED_AVB_WIFI_TIME_NO_MAP,       /* the MAC clock could not be mapped */
+  HOSTED_AVB_WIFI_TIME_NOT_STARTED,  /* the session could not start */
+  HOSTED_AVB_WIFI_TIME_RESULTS
+} hosted_avb_wifi_time_result_t;
+
+/* Where the responder's clock rate against ours came from: the burst's
+ * own measurements, or with only one, the previous session's, or the
+ * last rate seen. */
+typedef enum {
+  HOSTED_AVB_WIFI_TIME_RATE_BURST = 0,
+  HOSTED_AVB_WIFI_TIME_RATE_SESSIONS,
+  HOSTED_AVB_WIFI_TIME_RATE_HELD,
+} hosted_avb_wifi_time_rate_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t result; /* hosted_avb_wifi_time_result_t */
+  uint8_t ftm_status;
+  uint8_t entries;
+  uint8_t follow_ups; /* entries that carried a Follow_Up */
+  uint8_t granted_frames;
+  uint8_t domain;
+  int8_t log_interval;
+  uint32_t coprocessor_boot;
+  uint32_t session;
+  int64_t cp_ns;        /* clock-link timer at the measurement, ns */
+  int64_t reference_ns; /* gPTP time at that instant */
+  int32_t rtt_ps;
+  int32_t rate_ppb; /* the responder's gPTP rate against the timer */
+  uint32_t map_uncertainty_ns;
+  int32_t map_shift_ns; /* MAC clock map change across the session */
+  uint16_t time_base;
+  uint8_t source_port[10];
+  int8_t rssi;
+  uint8_t refused;     /* Follow_Ups the responder sent empty (declined) */
+  uint8_t rate_source; /* hosted_avb_wifi_time_rate_t */
+  uint8_t reserved;
+} hosted_avb_wifi_time_t;
+
+_Static_assert(sizeof(hosted_avb_wifi_time_t) == 64, "wifi time");

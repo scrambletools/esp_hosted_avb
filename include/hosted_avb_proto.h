@@ -25,6 +25,10 @@
 #define HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK  (HOSTED_AVB_MSG_BASE | 0x08U)
 #define HOSTED_AVB_MSG_CLOCK_LINK_EDGE     (HOSTED_AVB_MSG_BASE | 0x09U)
 #define HOSTED_AVB_MSG_WIFI_TIME           (HOSTED_AVB_MSG_BASE | 0x0AU)
+/* ESP-AVB-Bridge's ftm_time_responder defines these three payloads. */
+#define HOSTED_AVB_MSG_FTM_TRANSFER        (HOSTED_AVB_MSG_BASE | 0x0BU)
+#define HOSTED_AVB_MSG_FTM_ASSOCIATIONS    (HOSTED_AVB_MSG_BASE | 0x0CU)
+#define HOSTED_AVB_MSG_FTM_RESPONDER_STATUS (HOSTED_AVB_MSG_BASE | 0x0DU)
 
 /* Vendor IE constants shared between host marshaller, coprocessor
  * handler, and STA parser.

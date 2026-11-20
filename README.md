@@ -79,6 +79,9 @@ component is linked in.
 | `0x50545008` | `HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK` | coprocessor → host | `hosted_avb_clock_link_arm_t` |
 | `0x50545009` | `HOSTED_AVB_MSG_CLOCK_LINK_EDGE` | coprocessor → host | `hosted_avb_clock_link_edge_t` |
 | `0x5054500A` | `HOSTED_AVB_MSG_WIFI_TIME` | coprocessor → host | `hosted_avb_wifi_time_t` |
+| `0x5054500B` | `HOSTED_AVB_MSG_FTM_TRANSFER` | host → coprocessor | ESP-AVB-Bridge `ftm_time_transfer_t` |
+| `0x5054500C` | `HOSTED_AVB_MSG_FTM_ASSOCIATIONS` | host → coprocessor | ESP-AVB-Bridge admitted stations |
+| `0x5054500D` | `HOSTED_AVB_MSG_FTM_RESPONDER_STATUS` | coprocessor → host | ESP-AVB-Bridge `ftm_time_responder_status_t` |
 
 `ASSOCIATIONS` lists the stations associated with the coprocessor's
 access point, with a random per-boot `radio_boot` and a `generation`
@@ -123,7 +126,11 @@ PTP clock steps.
 With the link running, `hosted_avb_clock_link_to_host()` puts a
 coprocessor timer time (`hosted_avb_clock_link_coprocessor_read()` on
 the coprocessor gives readings in it) on the host's PTP clock, through a
-fit over the last 32 edges.
+fit over the last 32 edges, and `hosted_avb_clock_link_fit()` hands the
+fit itself to the coprocessor's side. The fit starts again when the
+coprocessor restarts. On the coprocessor, `hosted_avb_clock_link_map_mac()`
+maps the Wi-Fi MAC clock, which FTM timestamps run on, onto the link's
+timer.
 
 `WIFI_TIME` carries one FTM session of a coprocessor station's time
 engine (ESP-AVB-Bridge's `ftm_time_engine`): gPTP time from the
@@ -131,7 +138,9 @@ responder's Follow_Up against the coprocessor's clock-link timer, or why
 the session gave none. The host side (`CONFIG_HOSTED_AVB_WIFI_TIME`,
 `hosted_avb_wifi_time_start()`) puts each on the host's PTP clock and
 logs, every 10 s, how far it sat from that clock (`WIFITIME`) and the
-sessions by measurements and Follow_Ups received (`WIFISESS`). On a host
+sessions by measurements and Follow_Ups received (`WIFISESS`).
+`hosted_avb_wifi_time_set_callback()` hands each measurement on, for
+example to esp_ptp's external time source. On a host
 synchronized by wire that difference is the transfer's error: on the
 bench, one Wi-Fi hop, about 290 ns standard deviation with a mean within
 50 ns, 98.5% of sessions measured.

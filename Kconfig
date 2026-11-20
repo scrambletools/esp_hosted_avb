@@ -14,6 +14,34 @@ config HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
         framework (CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA). Leave disabled
         on hosts; the host needs only the headers.
 
+config HOSTED_AVB_CLOCK_LINK
+    bool "Clock link between the host and the coprocessor"
+    default n
+    select GPTIMER_CTRL_FUNC_IN_IRAM if HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
+    help
+        A wire from a host GPIO to a coprocessor GPIO (R52 on the Waveshare
+        ESP32-P4-WIFI6-POE-ETH: P4 GPIO6 to C6 GPIO2). The host pulses it,
+        both chips latch the edge on a 40 MHz timer, and each edge pairs
+        the host's PTP clock with the coprocessor's timer and Wi-Fi MAC
+        clock. Enable on both the host and the coprocessor. The host logs
+        a fit of the two clocks every 10 s (CLOCKLINK lines).
+
+config HOSTED_AVB_CLOCK_LINK_HOST_GPIO
+    int "Host GPIO that drives the link"
+    depends on HOSTED_AVB_CLOCK_LINK
+    default 6
+
+config HOSTED_AVB_CLOCK_LINK_COPROCESSOR_GPIO
+    int "Coprocessor GPIO that receives it"
+    depends on HOSTED_AVB_CLOCK_LINK
+    default 2
+
+config HOSTED_AVB_CLOCK_LINK_PERIOD_MS
+    int "Time between edges, ms"
+    depends on HOSTED_AVB_CLOCK_LINK
+    range 50 10000
+    default 250
+
 config HOSTED_AVB_COPROCESSOR_PROJECT
     string "Coprocessor firmware project name"
     default "avb_bridge_coprocessor"

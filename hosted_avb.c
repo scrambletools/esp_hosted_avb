@@ -7,6 +7,7 @@
  */
 
 #include "hosted_avb.h"
+#include "hosted_avb_clock_link.h"
 #include "hosted_avb_peer.h"
 #include "hosted_avb_proto.h"
 
@@ -371,6 +372,11 @@ esp_err_t hosted_avb_init(void) {
   }
   ESP_LOGI(TAG, "handlers registered (msg_id base 0x%08x)",
            (unsigned)HOSTED_AVB_MSG_BASE);
+#if CONFIG_HOSTED_AVB_CLOCK_LINK
+  r = hosted_avb_clock_link_coprocessor_init();
+  if (r != ESP_OK)
+    ESP_LOGE(TAG, "clock link: %s", esp_err_to_name(r));
+#endif
   return ESP_OK;
 }
 

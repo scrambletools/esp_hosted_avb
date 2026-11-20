@@ -75,6 +75,9 @@ component is linked in.
 | `0x50545004` | `HOSTED_AVB_MSG_ASSOCIATIONS` | coprocessor → host | `hosted_avb_associations_t` |
 | `0x50545005` | `HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ` | host → coprocessor | `hosted_avb_config_11b_rate_t` |
 | `0x50545006` | `HOSTED_AVB_MSG_CONFIG_11B_RATE_ACK` | coprocessor → host | `int32_t esp_err_t` |
+| `0x50545007` | `HOSTED_AVB_MSG_CLOCK_LINK_ARM` | host → coprocessor | `hosted_avb_clock_link_arm_t` |
+| `0x50545008` | `HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK` | coprocessor → host | `hosted_avb_clock_link_arm_t` |
+| `0x50545009` | `HOSTED_AVB_MSG_CLOCK_LINK_EDGE` | coprocessor → host | `hosted_avb_clock_link_edge_t` |
 
 `ASSOCIATIONS` lists the stations associated with the coprocessor's
 access point, with a random per-boot `radio_boot` and a `generation`
@@ -101,6 +104,20 @@ before starting Wi-Fi. A coprocessor without this message never
 answers; the host should time out and carry on. Setting the protocol to
 802.11g/n through esp-hosted does not do this: the beacons stay at
 1 Mbps.
+
+The clock link (`CONFIG_HOSTED_AVB_CLOCK_LINK`, on both sides) times a
+wire from a host GPIO to a coprocessor GPIO: R52 on the Waveshare
+ESP32-P4-WIFI6-POE-ETH, P4 GPIO6 to C6 GPIO2. For each edge the host
+sends `CLOCK_LINK_ARM`, the coprocessor arms and answers `ARM_ACK`, the
+host pulses the wire, and both chips latch the edge on a 40 MHz timer in
+hardware (GPIO event to timer capture). The host reads its EMAC PTP
+clock, and the coprocessor its Wi-Fi MAC clock, between two latches of
+that timer, and the coprocessor sends its latch back in `EDGE`. Each
+edge pairs the host's PTP clock with the coprocessor's timer and MAC
+clock (`hosted_avb_clock_link_latest()`), and the host logs a fit every
+10 s. On the bench, at 4 edges a second, the fit left 25 to 32 ns rms
+(about 100 ns peak to peak over 8 s), close to the 25 ns timer and 40 ns
+PTP clock steps.
 
 `0x5054_5000` (`"PTP\0"`) is the message-ID base; the low byte is the
 opcode. Reserved for future expansion (e.g. FTM-frame Vendor IE

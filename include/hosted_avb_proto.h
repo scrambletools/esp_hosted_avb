@@ -21,6 +21,9 @@
 #define HOSTED_AVB_MSG_ASSOCIATIONS        (HOSTED_AVB_MSG_BASE | 0x04U)
 #define HOSTED_AVB_MSG_CONFIG_11B_RATE_REQ (HOSTED_AVB_MSG_BASE | 0x05U)
 #define HOSTED_AVB_MSG_CONFIG_11B_RATE_ACK (HOSTED_AVB_MSG_BASE | 0x06U)
+#define HOSTED_AVB_MSG_CLOCK_LINK_ARM      (HOSTED_AVB_MSG_BASE | 0x07U)
+#define HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK  (HOSTED_AVB_MSG_BASE | 0x08U)
+#define HOSTED_AVB_MSG_CLOCK_LINK_EDGE     (HOSTED_AVB_MSG_BASE | 0x09U)
 
 /* Vendor IE constants shared between host marshaller, coprocessor
  * handler, and STA parser.
@@ -100,3 +103,35 @@ typedef struct __attribute__((packed)) {
   uint32_t generation;
   uint8_t macs[HOSTED_AVB_ASSOCIATIONS_MAX][6];
 } hosted_avb_associations_t;
+
+/* Clock link (CONFIG_HOSTED_AVB_CLOCK_LINK): the host arms the
+ * coprocessor for edge `sequence` (ARM), the coprocessor answers whether
+ * it armed (ARM_ACK), the host pulses the link, and the coprocessor sends
+ * what its timer latched (EDGE). */
+#define HOSTED_AVB_CLOCK_LINK_VERSION 1
+
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t accepted; /* ARM_ACK: 1 when armed for this edge */
+  uint8_t reserved[2];
+  uint32_t host_boot;
+  uint32_t sequence;
+  uint32_t coprocessor_boot; /* ARM_ACK */
+} hosted_avb_clock_link_arm_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t valid;
+  uint8_t reserved[2];
+  uint32_t host_boot;
+  uint32_t sequence;
+  uint32_t coprocessor_boot;
+  uint64_t edge_ticks;       /* coprocessor 40 MHz timer at the edge */
+  uint64_t mac_before_ticks; /* the timer around the MAC clock read */
+  uint64_t mac_after_ticks;
+  uint32_t mac_us;           /* coprocessor Wi-Fi MAC clock, us */
+  uint32_t reserved2;
+} hosted_avb_clock_link_edge_t;
+
+_Static_assert(sizeof(hosted_avb_clock_link_arm_t) == 16, "clock link arm");
+_Static_assert(sizeof(hosted_avb_clock_link_edge_t) == 48, "clock link edge");

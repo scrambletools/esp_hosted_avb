@@ -1,0 +1,436 @@
+/*
+ * Copyright 2026 Scramble Tools
+ * License: MIT
+ *
+ * Clock link between the host and the coprocessor (see
+ * hosted_avb_clock_link.h). Per edge: the host sends ARM with a sequence,
+ * the coprocessor arms its capture and answers ARM_ACK, the host pulses
+ * the link and reads its PTP clock against its own latch of the edge, and
+ * the coprocessor sends EDGE with its latch and a bracketed read of its
+ * Wi-Fi MAC clock. The host keeps the pairs and logs a fit of the
+ * coprocessor's timer against its PTP clock.
+ */
+#include "hosted_avb_clock_link.h"
+
+#include "sdkconfig.h"
+
+#if CONFIG_HOSTED_AVB_CLOCK_LINK
+
+#include <inttypes.h>
+#include <math.h>
+#include <string.h>
+
+#include "driver/gpio.h"
+#include "driver/gpio_etm.h"
+#include "driver/gptimer.h"
+#include "driver/gptimer_etm.h"
+#include "esp_attr.h"
+#include "esp_check.h"
+#include "esp_etm.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "hosted_avb_peer.h"
+#include "hosted_avb_proto.h"
+
+#define TICK_NS 25 /* the 40 MHz capture timers */
+
+static const char *TAG = "clock_link";
+
+/* hosted_avb_timer_bracket.c, built inside the GPTimer driver. */
+extern void hosted_avb_timer_bracket(gptimer_handle_t timer,
+                                     volatile const uint32_t *reg,
+                                     uint64_t *before, uint32_t *value,
+                                     uint64_t *after);
+
+/* A free-running 40 MHz timer whose capture register latches each rising
+ * edge on gpio, in hardware (GPIO ETM event to timer capture task). */
+static esp_err_t new_edge_timer(int gpio, gptimer_handle_t *timer) {
+  gptimer_config_t config = {
+      .clk_src = GPTIMER_CLK_SRC_PLL_F80M,
+      .direction = GPTIMER_COUNT_UP,
+      .resolution_hz = 1000000000 / TICK_NS,
+  };
+  ESP_RETURN_ON_ERROR(gptimer_new_timer(&config, timer), TAG, "timer");
+  esp_etm_channel_config_t channel_config = {0};
+  esp_etm_channel_handle_t channel;
+  ESP_RETURN_ON_ERROR(esp_etm_new_channel(&channel_config, &channel), TAG,
+                      "ETM channel");
+  gpio_etm_event_config_t edge_config = {.edge = GPIO_ETM_EVENT_EDGE_POS};
+  esp_etm_event_handle_t edge;
+  ESP_RETURN_ON_ERROR(gpio_new_etm_event(&edge_config, &edge), TAG,
+                      "GPIO event");
+  ESP_RETURN_ON_ERROR(gpio_etm_event_bind_gpio(edge, gpio), TAG, "bind");
+  gptimer_etm_task_config_t capture_config = {
+      .task_type = GPTIMER_ETM_TASK_CAPTURE};
+  esp_etm_task_handle_t capture;
+  ESP_RETURN_ON_ERROR(gptimer_new_etm_task(*timer, &capture_config, &capture),
+                      TAG, "capture task");
+  ESP_RETURN_ON_ERROR(esp_etm_channel_connect(channel, edge, capture), TAG,
+                      "connect");
+  ESP_RETURN_ON_ERROR(gptimer_enable(*timer), TAG, "enable");
+  ESP_RETURN_ON_ERROR(gptimer_start(*timer), TAG, "start");
+  ESP_RETURN_ON_ERROR(esp_etm_channel_enable(channel), TAG, "ETM enable");
+  return ESP_OK;
+}
+
+/* ---------------------------------------------------------------- host */
+#if CONFIG_ESP_HOSTED_HOST && CONFIG_IDF_TARGET_ESP32P4
+
+#include "soc/emac_ptp_struct.h"
+
+#define HOST_GPIO CONFIG_HOSTED_AVB_CLOCK_LINK_HOST_GPIO
+#define REPLY_TIMEOUT_MS 100
+#define FIT_SIZE 32
+#define REPORT_PERIOD_US (10 * 1000 * 1000LL)
+#define BRACKET_MAX_TICKS 40 /* 1 us */
+
+static gptimer_handle_t s_host_timer;
+static QueueHandle_t s_acks, s_edges;
+static uint32_t s_host_boot;
+static portMUX_TYPE s_latest_lock = portMUX_INITIALIZER_UNLOCKED;
+static hosted_avb_clock_pair_t s_latest;
+static bool s_have_latest;
+static TaskHandle_t s_link_task;
+
+static void on_reply(uint32_t msg_id, const uint8_t *data, size_t length,
+                     void *user) {
+  if (msg_id == HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK &&
+      length == sizeof(hosted_avb_clock_link_arm_t))
+    xQueueSend(s_acks, data, 0);
+  else if (msg_id == HOSTED_AVB_MSG_CLOCK_LINK_EDGE &&
+           length == sizeof(hosted_avb_clock_link_edge_t))
+    xQueueSend(s_edges, data, 0);
+}
+
+/* The EMAC PTP clock at the latched edge: its system time read between
+ * two timer latches, taken back to the edge. False while the clock is
+ * being set or the read straddled a second. */
+static bool ptp_at_edge(uint64_t edge_ticks, int64_t *ptp_ns) {
+  for (int attempt = 0; attempt < 4; attempt++) {
+    uint32_t control = EMAC_PTP.timestamp_ctrl.val;
+    uint32_t seconds = EMAC_PTP.sys_seconds.ts_second;
+    uint64_t before, after;
+    uint32_t fraction;
+    hosted_avb_timer_bracket(s_host_timer, &EMAC_PTP.sys_nanosec.val, &before,
+                             &fraction, &after);
+    bool digital = EMAC_PTP.timestamp_ctrl.ts_digit_bin_roll_ctrl;
+    bool stable = EMAC_PTP.timestamp_ctrl.en_timestamp &&
+                  !EMAC_PTP.timestamp_ctrl.ts_initialize &&
+                  !EMAC_PTP.timestamp_ctrl.ts_update &&
+                  seconds == EMAC_PTP.sys_seconds.ts_second &&
+                  control == EMAC_PTP.timestamp_ctrl.val &&
+                  after - before <= BRACKET_MAX_TICKS;
+    fraction &= 0x7fffffffU;
+    uint32_t nanos = digital
+                         ? fraction
+                         : (uint32_t)(((uint64_t)fraction * 1000000000ULL) >> 31);
+    if (!stable || nanos >= 1000000000U)
+      continue;
+    uint64_t middle = before + (after - before) / 2;
+    *ptp_ns = (int64_t)seconds * 1000000000LL + nanos -
+              (int64_t)(middle - edge_ticks) * TICK_NS;
+    return true;
+  }
+  return false;
+}
+
+/* Pulses the link and returns the host timer's latch of the edge. */
+static bool emit_edge(uint64_t *edge_ticks) {
+  uint64_t baseline = 0;
+  gptimer_get_captured_count(s_host_timer, &baseline);
+  gpio_set_level(HOST_GPIO, 1);
+  esp_rom_delay_us(5);
+  gpio_set_level(HOST_GPIO, 0);
+  if (gptimer_get_captured_count(s_host_timer, edge_ticks) != ESP_OK)
+    return false;
+  return *edge_ticks != baseline;
+}
+
+/* Least-squares fit of the host PTP clock against the coprocessor timer
+ * over the last pairs: its rate in ppm and the spread around it. */
+static void report_fit(const hosted_avb_clock_pair_t *pairs, int count,
+                       uint32_t paired, uint32_t missed) {
+  if (count < 4) {
+    ESP_LOGW(TAG, "CLOCKLINK,%" PRIu32 ",%" PRIu32 ",too few pairs", paired,
+             missed);
+    return;
+  }
+  const hosted_avb_clock_pair_t *first = &pairs[0];
+  double sum_x = 0, sum_y = 0, sum_xx = 0, sum_xy = 0;
+  for (int i = 0; i < count; i++) {
+    double x = (double)(pairs[i].cp_ticks - first->cp_ticks) * TICK_NS;
+    double y = (double)(pairs[i].host_ptp_ns - first->host_ptp_ns);
+    sum_x += x;
+    sum_y += y;
+    sum_xx += x * x;
+    sum_xy += x * y;
+  }
+  double slope = (count * sum_xy - sum_x * sum_y) /
+                 (count * sum_xx - sum_x * sum_x);
+  double intercept = (sum_y - slope * sum_x) / count;
+  double sum_rr = 0, low = 0, high = 0;
+  for (int i = 0; i < count; i++) {
+    double x = (double)(pairs[i].cp_ticks - first->cp_ticks) * TICK_NS;
+    double y = (double)(pairs[i].host_ptp_ns - first->host_ptp_ns);
+    double residual = y - (intercept + slope * x);
+    sum_rr += residual * residual;
+    if (i == 0 || residual < low)
+      low = residual;
+    if (i == 0 || residual > high)
+      high = residual;
+  }
+  ESP_LOGI(TAG,
+           "CLOCKLINK,%" PRIu32 ",%" PRIu32 ",rate %.3f ppm,residual rms %.1f "
+           "ns p-p %.1f ns over %d edges",
+           paired, missed, (slope - 1.0) * 1e6, sqrt(sum_rr / count),
+           high - low, count);
+}
+
+/* The ticks left before end, or 0 once it has passed. */
+static TickType_t ticks_left(TickType_t end) {
+  int32_t left = (int32_t)(end - xTaskGetTickCount());
+  return left > 0 ? (TickType_t)left : 0;
+}
+
+static bool wait_ack(uint32_t sequence) {
+  hosted_avb_clock_link_arm_t ack;
+  TickType_t end = xTaskGetTickCount() + pdMS_TO_TICKS(REPLY_TIMEOUT_MS);
+  while (xQueueReceive(s_acks, &ack, ticks_left(end)) == pdTRUE) {
+    if (ack.version == HOSTED_AVB_CLOCK_LINK_VERSION &&
+        ack.host_boot == s_host_boot && ack.sequence == sequence)
+      return ack.accepted;
+  }
+  return false;
+}
+
+static bool wait_edge(uint32_t sequence, hosted_avb_clock_link_edge_t *edge) {
+  TickType_t end = xTaskGetTickCount() + pdMS_TO_TICKS(REPLY_TIMEOUT_MS);
+  while (xQueueReceive(s_edges, edge, ticks_left(end)) == pdTRUE) {
+    if (edge->version == HOSTED_AVB_CLOCK_LINK_VERSION &&
+        edge->host_boot == s_host_boot && edge->sequence == sequence)
+      return edge->valid;
+  }
+  return false;
+}
+
+static void link_task(void *arg) {
+  hosted_avb_clock_pair_t ring[FIT_SIZE];
+  int ring_count = 0, ring_next = 0;
+  uint32_t sequence = 0, paired = 0, missed = 0;
+  int64_t next_report = esp_timer_get_time() + REPORT_PERIOD_US;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_HOSTED_AVB_CLOCK_LINK_PERIOD_MS));
+    if (esp_timer_get_time() >= next_report) {
+      hosted_avb_clock_pair_t ordered[FIT_SIZE];
+      for (int i = 0; i < ring_count; i++)
+        ordered[i] = ring[(ring_next - ring_count + i + FIT_SIZE) % FIT_SIZE];
+      report_fit(ordered, ring_count, paired, missed);
+      next_report = esp_timer_get_time() + REPORT_PERIOD_US;
+    }
+    sequence++;
+    hosted_avb_clock_link_arm_t arm = {
+        .version = HOSTED_AVB_CLOCK_LINK_VERSION,
+        .host_boot = s_host_boot,
+        .sequence = sequence,
+    };
+    xQueueReset(s_acks);
+    xQueueReset(s_edges);
+    uint64_t edge_ticks;
+    int64_t ptp_ns;
+    hosted_avb_clock_link_edge_t edge;
+    if (hosted_avb_peer_send(HOSTED_AVB_MSG_CLOCK_LINK_ARM,
+                             (const uint8_t *)&arm, sizeof(arm)) != ESP_OK ||
+        !wait_ack(sequence) || !emit_edge(&edge_ticks) ||
+        !ptp_at_edge(edge_ticks, &ptp_ns) || !wait_edge(sequence, &edge)) {
+      missed++;
+      continue;
+    }
+    hosted_avb_clock_pair_t pair = {
+        .sequence = sequence,
+        .host_ptp_ns = ptp_ns,
+        .cp_ticks = edge.edge_ticks,
+        .cp_mac_ticks = edge.mac_before_ticks +
+                        (edge.mac_after_ticks - edge.mac_before_ticks) / 2,
+        .cp_mac_us = edge.mac_us,
+    };
+    portENTER_CRITICAL(&s_latest_lock);
+    s_latest = pair;
+    s_have_latest = true;
+    portEXIT_CRITICAL(&s_latest_lock);
+    ring[ring_next] = pair;
+    ring_next = (ring_next + 1) % FIT_SIZE;
+    if (ring_count < FIT_SIZE)
+      ring_count++;
+    paired++;
+  }
+}
+
+esp_err_t hosted_avb_clock_link_start(void) {
+  if (s_link_task)
+    return ESP_OK;
+  s_host_boot = esp_random() | 1;
+  gpio_config_t pin = {
+      .pin_bit_mask = 1ULL << HOST_GPIO,
+      .mode = GPIO_MODE_INPUT_OUTPUT, /* the timer latches our own edge */
+      .intr_type = GPIO_INTR_DISABLE,
+  };
+  gpio_set_level(HOST_GPIO, 0);
+  ESP_RETURN_ON_ERROR(gpio_config(&pin), TAG, "GPIO");
+  ESP_RETURN_ON_ERROR(new_edge_timer(HOST_GPIO, &s_host_timer), TAG,
+                      "edge timer");
+  s_acks = xQueueCreate(4, sizeof(hosted_avb_clock_link_arm_t));
+  s_edges = xQueueCreate(4, sizeof(hosted_avb_clock_link_edge_t));
+  if (!s_acks || !s_edges)
+    return ESP_ERR_NO_MEM;
+  ESP_RETURN_ON_ERROR(hosted_avb_peer_register(
+                          HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK, on_reply, NULL),
+                      TAG, "register ARM_ACK");
+  ESP_RETURN_ON_ERROR(hosted_avb_peer_register(HOSTED_AVB_MSG_CLOCK_LINK_EDGE,
+                                               on_reply, NULL),
+                      TAG, "register EDGE");
+  if (xTaskCreate(link_task, "clock_link", 4096, NULL, 3, &s_link_task) !=
+      pdPASS)
+    return ESP_ERR_NO_MEM;
+  ESP_LOGI(TAG, "Clock link on GPIO%d, an edge every %d ms", HOST_GPIO,
+           CONFIG_HOSTED_AVB_CLOCK_LINK_PERIOD_MS);
+  return ESP_OK;
+}
+
+bool hosted_avb_clock_link_latest(hosted_avb_clock_pair_t *pair) {
+  portENTER_CRITICAL(&s_latest_lock);
+  bool have = s_have_latest;
+  if (have)
+    *pair = s_latest;
+  portEXIT_CRITICAL(&s_latest_lock);
+  return have;
+}
+
+#endif /* host */
+
+/* --------------------------------------------------------- coprocessor */
+#if CONFIG_HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
+
+#define CP_GPIO CONFIG_HOSTED_AVB_CLOCK_LINK_COPROCESSOR_GPIO
+#if CONFIG_IDF_TARGET_ESP32C6
+/* The Wi-Fi MAC's microsecond clock, read beside each edge. */
+#define MAC_CLOCK_REG ((volatile const uint32_t *)0x600ad000U)
+#endif
+
+static DRAM_ATTR gptimer_handle_t s_cp_timer;
+static DRAM_ATTR portMUX_TYPE s_cp_lock = portMUX_INITIALIZER_UNLOCKED;
+static DRAM_ATTR struct {
+  bool armed;
+  uint32_t host_boot;
+  uint32_t sequence;
+  uint64_t baseline;
+} s_arm;
+static DRAM_ATTR hosted_avb_clock_link_edge_t s_edge;
+static DRAM_ATTR TaskHandle_t s_cp_task;
+static uint32_t s_cp_boot;
+
+static void IRAM_ATTR on_edge(void *arg) {
+  uint64_t ticks;
+  /* The hardware latch first: the bracket's soft latches overwrite it. */
+  if (gptimer_get_captured_count(s_cp_timer, &ticks) != ESP_OK)
+    return;
+  uint64_t before = 0, after = 0;
+  uint32_t mac_us = 0;
+#ifdef MAC_CLOCK_REG
+  hosted_avb_timer_bracket(s_cp_timer, MAC_CLOCK_REG, &before, &mac_us,
+                           &after);
+#endif
+  bool notify = false;
+  portENTER_CRITICAL_ISR(&s_cp_lock);
+  if (s_arm.armed && ticks != s_arm.baseline) {
+    s_edge = (hosted_avb_clock_link_edge_t){
+        .version = HOSTED_AVB_CLOCK_LINK_VERSION,
+        .valid = 1,
+        .host_boot = s_arm.host_boot,
+        .sequence = s_arm.sequence,
+        .coprocessor_boot = s_cp_boot,
+        .edge_ticks = ticks,
+        .mac_before_ticks = before,
+        .mac_after_ticks = after,
+        .mac_us = mac_us,
+    };
+    s_arm.armed = false;
+    notify = true;
+  }
+  portEXIT_CRITICAL_ISR(&s_cp_lock);
+  if (notify) {
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_cp_task, &woken);
+    portYIELD_FROM_ISR(woken);
+  }
+}
+
+static void on_arm(uint32_t msg_id, const uint8_t *data, size_t length,
+                   void *user) {
+  hosted_avb_clock_link_arm_t arm;
+  if (msg_id != HOSTED_AVB_MSG_CLOCK_LINK_ARM || length != sizeof(arm))
+    return;
+  memcpy(&arm, data, sizeof(arm));
+  if (arm.version != HOSTED_AVB_CLOCK_LINK_VERSION)
+    return;
+  uint64_t baseline = 0;
+  arm.accepted =
+      gptimer_get_captured_count(s_cp_timer, &baseline) == ESP_OK;
+  portENTER_CRITICAL(&s_cp_lock);
+  s_arm.armed = arm.accepted;
+  s_arm.host_boot = arm.host_boot;
+  s_arm.sequence = arm.sequence;
+  s_arm.baseline = baseline;
+  portEXIT_CRITICAL(&s_cp_lock);
+  arm.coprocessor_boot = s_cp_boot;
+  hosted_avb_peer_send(HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK,
+                       (const uint8_t *)&arm, sizeof(arm));
+}
+
+static void cp_task(void *arg) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    hosted_avb_clock_link_edge_t edge;
+    portENTER_CRITICAL(&s_cp_lock);
+    edge = s_edge;
+    portEXIT_CRITICAL(&s_cp_lock);
+    hosted_avb_peer_send(HOSTED_AVB_MSG_CLOCK_LINK_EDGE,
+                         (const uint8_t *)&edge, sizeof(edge));
+  }
+}
+
+esp_err_t hosted_avb_clock_link_coprocessor_init(void) {
+  s_cp_boot = esp_random() | 1;
+  gpio_config_t pin = {
+      .pin_bit_mask = 1ULL << CP_GPIO,
+      .mode = GPIO_MODE_INPUT,
+      .pull_down_en = GPIO_PULLDOWN_ENABLE,
+      .intr_type = GPIO_INTR_DISABLE,
+  };
+  ESP_RETURN_ON_ERROR(gpio_config(&pin), TAG, "GPIO");
+  ESP_RETURN_ON_ERROR(new_edge_timer(CP_GPIO, &s_cp_timer), TAG,
+                      "edge timer");
+  if (xTaskCreate(cp_task, "clock_link", 3072, NULL, 5, &s_cp_task) != pdPASS)
+    return ESP_ERR_NO_MEM;
+  esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    return err;
+  ESP_RETURN_ON_ERROR(gpio_isr_handler_add(CP_GPIO, on_edge, NULL), TAG,
+                      "ISR");
+  ESP_RETURN_ON_ERROR(gpio_set_intr_type(CP_GPIO, GPIO_INTR_POSEDGE), TAG,
+                      "interrupt type");
+  ESP_RETURN_ON_ERROR(gpio_intr_enable(CP_GPIO), TAG, "interrupt");
+  ESP_RETURN_ON_ERROR(
+      hosted_avb_peer_register(HOSTED_AVB_MSG_CLOCK_LINK_ARM, on_arm, NULL),
+      TAG, "register ARM");
+  ESP_LOGI(TAG, "Clock link on GPIO%d", CP_GPIO);
+  return ESP_OK;
+}
+
+#endif /* coprocessor */
+
+#endif /* CONFIG_HOSTED_AVB_CLOCK_LINK */

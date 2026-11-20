@@ -29,6 +29,8 @@ static TaskHandle_t s_task;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static hosted_avb_wifi_time_sample_t s_latest;
 static bool s_have_latest;
+static hosted_avb_wifi_time_callback_t s_callback;
+static void *s_callback_context;
 
 /* One reporting window. */
 typedef struct {
@@ -226,7 +228,11 @@ static void wifi_time_task(void *arg) {
         portENTER_CRITICAL(&s_lock);
         s_latest = sample;
         s_have_latest = true;
+        hosted_avb_wifi_time_callback_t callback = s_callback;
+        void *context = s_callback_context;
         portEXIT_CRITICAL(&s_lock);
+        if (callback)
+          callback(&sample, context);
       }
     }
     if (esp_timer_get_time() >= next_report) {
@@ -262,4 +268,12 @@ bool hosted_avb_wifi_time_latest(hosted_avb_wifi_time_sample_t *sample) {
     *sample = s_latest;
   portEXIT_CRITICAL(&s_lock);
   return have;
+}
+
+void hosted_avb_wifi_time_set_callback(hosted_avb_wifi_time_callback_t callback,
+                                       void *context) {
+  portENTER_CRITICAL(&s_lock);
+  s_callback = callback;
+  s_callback_context = context;
+  portEXIT_CRITICAL(&s_lock);
 }

@@ -36,6 +36,13 @@ esp_err_t hosted_avb_wifi_time_start(void);
 /* The latest measurement; false before the first. */
 bool hosted_avb_wifi_time_latest(hosted_avb_wifi_time_sample_t *sample);
 
+/* Called with every measurement as it is put on the host clock, on the
+ * receiver's task; keep it short. NULL to stop. */
+typedef void (*hosted_avb_wifi_time_callback_t)(
+    const hosted_avb_wifi_time_sample_t *sample, void *context);
+void hosted_avb_wifi_time_set_callback(hosted_avb_wifi_time_callback_t callback,
+                                       void *context);
+
 #ifdef __cplusplus
 }
 #endif

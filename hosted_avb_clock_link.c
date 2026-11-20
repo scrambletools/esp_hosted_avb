@@ -107,6 +107,7 @@ static TaskHandle_t s_link_task;
 typedef struct {
   bool valid;
   int count;
+  uint32_t coprocessor_boot;
   uint64_t anchor_ticks;
   int64_t anchor_host_ns;
   double slope, intercept, rms, peak_to_peak;
@@ -297,11 +298,14 @@ static void link_task(void *arg) {
                         (edge.mac_after_ticks - edge.mac_before_ticks) / 2,
         .cp_mac_us = edge.mac_us,
     };
-    /* A pair far off the fit means the host clock was stepped (or the
-     * coprocessor restarted): start the fit again from this pair. */
-    if (fit.count >= 2 &&
-        fabs((double)ptp_ns - fit_host_ns(&fit, pair.cp_ticks)) >
-            STEP_LIMIT_NS) {
+    /* A restarted coprocessor has a new timer; a pair far off the fit
+     * means the host clock was stepped. Either way, fit again from here. */
+    if (fit.count && edge.coprocessor_boot != fit.coprocessor_boot) {
+      ring_count = 0;
+      ESP_LOGW(TAG, "Coprocessor restarted: fitting again");
+    } else if (fit.count >= 2 &&
+               fabs((double)ptp_ns - fit_host_ns(&fit, pair.cp_ticks)) >
+                   STEP_LIMIT_NS) {
       ring_count = 0;
       steps++;
       ESP_LOGW(TAG, "Clock step of %.0f ns: fitting again",
@@ -316,6 +320,7 @@ static void link_task(void *arg) {
     for (int i = 0; i < ring_count; i++)
       ordered[i] = ring[(ring_next - ring_count + i + FIT_SIZE) % FIT_SIZE];
     fit_pairs(ordered, ring_count, &fit);
+    fit.coprocessor_boot = edge.coprocessor_boot;
     portENTER_CRITICAL(&s_latest_lock);
     s_latest = pair;
     s_have_latest = true;
@@ -362,6 +367,21 @@ bool hosted_avb_clock_link_latest(hosted_avb_clock_pair_t *pair) {
     *pair = s_latest;
   portEXIT_CRITICAL(&s_latest_lock);
   return have;
+}
+
+bool hosted_avb_clock_link_fit(int64_t *cp_ns, int64_t *host_ns,
+                               double *rate, uint32_t *coprocessor_boot) {
+  portENTER_CRITICAL(&s_latest_lock);
+  clock_fit_t fit = s_fit;
+  uint64_t latest_ticks = s_latest.cp_ticks;
+  portEXIT_CRITICAL(&s_latest_lock);
+  if (!fit.valid || esp_timer_get_time() - fit.updated_us > FIT_MAX_AGE_US)
+    return false;
+  *cp_ns = (int64_t)latest_ticks * TICK_NS;
+  *host_ns = (int64_t)llround(fit_host_ns(&fit, latest_ticks));
+  *rate = fit.slope;
+  *coprocessor_boot = fit.coprocessor_boot;
+  return true;
 }
 
 bool hosted_avb_clock_link_to_host(int64_t cp_ns, int64_t *host_ns) {
@@ -441,6 +461,8 @@ static void IRAM_ATTR on_edge(void *arg) {
   }
 }
 
+uint32_t hosted_avb_clock_link_coprocessor_boot(void) { return s_cp_boot; }
+
 bool hosted_avb_clock_link_coprocessor_read(volatile const uint32_t *reg,
                                             int64_t *before_ns, uint32_t *value,
                                             int64_t *after_ns) {
@@ -453,6 +475,62 @@ bool hosted_avb_clock_link_coprocessor_read(volatile const uint32_t *reg,
   *after_ns = (int64_t)after * TICK_NS;
   return true;
 }
+
+#ifdef MAC_CLOCK_REG
+#define MAP_SAMPLES 256
+#define MAP_MAX_BRACKET_NS 1000
+
+/* Each bracketed read bounds the map; at random phases against the MAC
+ * clock's microsecond steps the bounds close in to about the bracket. */
+bool hosted_avb_clock_link_map_mac(hosted_avb_mac_map_t *map) {
+  *map = (hosted_avb_mac_map_t){0};
+  uint32_t phase = esp_random() | 1;
+  uint32_t anchor_mac = 0;
+  int64_t lower = INT64_MIN, upper = INT64_MAX;
+  unsigned used = 0;
+  for (unsigned attempt = 0; attempt < MAP_SAMPLES; attempt++) {
+    phase ^= phase << 13;
+    phase ^= phase >> 17;
+    phase ^= phase << 5;
+    for (unsigned delay = phase & 31; delay; --delay)
+      __asm__ volatile("nop");
+    int64_t before, after;
+    uint32_t mac;
+    if (!hosted_avb_clock_link_coprocessor_read(MAC_CLOCK_REG, &before, &mac,
+                                                &after))
+      return false;
+    if (after - before > MAP_MAX_BRACKET_NS)
+      continue;
+    if (!used)
+      anchor_mac = mac;
+    int32_t delta = (int32_t)(mac - anchor_mac);
+    if (delta < 0 || delta > 1000000)
+      continue;
+    /* The timer at MAC time anchor_mac lies between these. */
+    int64_t low = before - (int64_t)delta * 1000 - 1000;
+    int64_t high = after + TICK_NS - (int64_t)delta * 1000;
+    if (low > lower)
+      lower = low;
+    if (high < upper)
+      upper = high;
+    used++;
+  }
+  if (used < MAP_SAMPLES / 4 || lower > upper || upper - lower > 1000)
+    return false;
+  *map = (hosted_avb_mac_map_t){
+      .valid = true,
+      .mac_us = anchor_mac,
+      .cp_ns = lower + (upper - lower) / 2,
+      .uncertainty_ns = (uint32_t)((upper - lower + 1) / 2),
+  };
+  return true;
+}
+#else
+bool hosted_avb_clock_link_map_mac(hosted_avb_mac_map_t *map) {
+  *map = (hosted_avb_mac_map_t){0};
+  return false;
+}
+#endif
 
 static void on_arm(uint32_t msg_id, const uint8_t *data, size_t length,
                    void *user) {

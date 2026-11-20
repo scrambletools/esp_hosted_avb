@@ -12,6 +12,9 @@ endif()
 if(CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA OR CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA)
   list(APPEND srcs "hosted_avb_peer.c")
 endif()
+if(CONFIG_ESP_HOSTED_HOST)
+  list(APPEND srcs "hosted_avb_coprocessor_fw.c")
+endif()
 
 # PRIV_REQUIRES must be unconditional: IDF resolves component deps
 # before CONFIG_* is populated, so gating this on Kconfig yields an
@@ -20,7 +23,7 @@ endif()
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES esp_wifi esp_event log
+    PRIV_REQUIRES esp_wifi esp_event log esp_app_format bootloader_support
     WHOLE_ARCHIVE
 )
 

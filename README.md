@@ -124,6 +124,21 @@ host-side consumers will not call this component directly —
 the AVB stack, and ESP-AVB-Bridge sends `CONFIG_11B_RATE_REQ` before it
 starts its access point.
 
+#### Coprocessor firmware updates
+
+On a host (`CONFIG_ESP_HOSTED_HOST`), `hosted_avb_coprocessor_fw.h`
+writes a coprocessor app image over esp-hosted's OTA calls:
+`hosted_avb_coprocessor_fw_store()` checks the image is for the
+coprocessor's chip and from `CONFIG_HOSTED_AVB_COPROCESSOR_PROJECT`
+(default `avb_bridge_coprocessor`), writes it to the coprocessor's spare
+OTA slot and lets the coprocessor check it again;
+`hosted_avb_coprocessor_fw_activate()` switches the coprocessor to it.
+The two have the signatures of esp_avb's coprocessor firmware object,
+so a host offers the coprocessor's firmware to ATDECC controllers by
+registering them with `esp_avb_register_coprocessor_fw()` (the header
+shows how). ESP-AVB-Bridge and ESP-AVB-Endpoint boards with a Wi-Fi
+coprocessor do.
+
 ### Coprocessor side
 
 The coprocessor build also adds this component and enables the handler

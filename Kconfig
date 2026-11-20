@@ -14,4 +14,12 @@ config HOSTED_AVB_BUILD_COPROCESSOR_HANDLER
         framework (CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA). Leave disabled
         on hosts; the host needs only the headers.
 
+config HOSTED_AVB_COPROCESSOR_PROJECT
+    string "Coprocessor firmware project name"
+    default "avb_bridge_coprocessor"
+    help
+        On a host, the project name a coprocessor app image must carry
+        before hosted_avb_coprocessor_fw_store() writes it to the
+        coprocessor.
+
 endmenu

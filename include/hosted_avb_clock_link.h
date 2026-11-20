@@ -37,9 +37,22 @@ esp_err_t hosted_avb_clock_link_start(void);
 /* Host: the latest edge both chips saw; false before the first. */
 bool hosted_avb_clock_link_latest(hosted_avb_clock_pair_t *pair);
 
+/* Host: the host PTP clock at a coprocessor timer time (its ticks in ns,
+ * as hosted_avb_clock_link_coprocessor_read gives them), from a fit over
+ * the last edges. False until enough edges have paired, while they are
+ * stale, or for a time far from them. */
+bool hosted_avb_clock_link_to_host(int64_t cp_ns, int64_t *host_ns);
+
 /* Coprocessor: arms the GPIO capture and answers the host (called from
  * hosted_avb_init). */
 esp_err_t hosted_avb_clock_link_coprocessor_init(void);
+
+/* Coprocessor: reads a 32-bit register between two latches of the link's
+ * timer, in that timer's ns (the domain the host can convert). False
+ * before the link has started. Callable from a task. */
+bool hosted_avb_clock_link_coprocessor_read(volatile const uint32_t *reg,
+                                            int64_t *before_ns, uint32_t *value,
+                                            int64_t *after_ns);
 
 #ifdef __cplusplus
 }

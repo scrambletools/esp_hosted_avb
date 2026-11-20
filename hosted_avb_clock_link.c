@@ -97,6 +97,23 @@ static hosted_avb_clock_pair_t s_latest;
 static bool s_have_latest;
 static TaskHandle_t s_link_task;
 
+#define FIT_MIN_PAIRS 8
+#define FIT_MAX_AGE_US (2 * 1000 * 1000LL)
+#define FIT_MAX_SPAN_NS (20 * 1000 * 1000 * 1000LL)
+#define STEP_LIMIT_NS 2000.0
+
+/* The host PTP clock against the coprocessor timer, fitted over the last
+ * pairs: host = anchor_host + intercept + slope * (cp - anchor_cp). */
+typedef struct {
+  bool valid;
+  int count;
+  uint64_t anchor_ticks;
+  int64_t anchor_host_ns;
+  double slope, intercept, rms, peak_to_peak;
+  int64_t updated_us;
+} clock_fit_t;
+static clock_fit_t s_fit;
+
 static void on_reply(uint32_t msg_id, const uint8_t *data, size_t length,
                      void *user) {
   if (msg_id == HOSTED_AVB_MSG_CLOCK_LINK_ARM_ACK &&
@@ -152,14 +169,12 @@ static bool emit_edge(uint64_t *edge_ticks) {
 }
 
 /* Least-squares fit of the host PTP clock against the coprocessor timer
- * over the last pairs: its rate in ppm and the spread around it. */
-static void report_fit(const hosted_avb_clock_pair_t *pairs, int count,
-                       uint32_t paired, uint32_t missed) {
-  if (count < 4) {
-    ESP_LOGW(TAG, "CLOCKLINK,%" PRIu32 ",%" PRIu32 ",too few pairs", paired,
-             missed);
+ * over pairs (oldest first), with the spread around it. */
+static void fit_pairs(const hosted_avb_clock_pair_t *pairs, int count,
+                      clock_fit_t *fit) {
+  *fit = (clock_fit_t){0};
+  if (count < 2)
     return;
-  }
   const hosted_avb_clock_pair_t *first = &pairs[0];
   double sum_x = 0, sum_y = 0, sum_xx = 0, sum_xy = 0;
   for (int i = 0; i < count; i++) {
@@ -184,11 +199,37 @@ static void report_fit(const hosted_avb_clock_pair_t *pairs, int count,
     if (i == 0 || residual > high)
       high = residual;
   }
+  *fit = (clock_fit_t){
+      .valid = count >= FIT_MIN_PAIRS,
+      .count = count,
+      .anchor_ticks = first->cp_ticks,
+      .anchor_host_ns = first->host_ptp_ns,
+      .slope = slope,
+      .intercept = intercept,
+      .rms = sqrt(sum_rr / count),
+      .peak_to_peak = high - low,
+      .updated_us = esp_timer_get_time(),
+  };
+}
+
+/* The fitted host time at a coprocessor timer reading. */
+static double fit_host_ns(const clock_fit_t *fit, uint64_t cp_ticks) {
+  double x = (double)(int64_t)(cp_ticks - fit->anchor_ticks) * TICK_NS;
+  return (double)fit->anchor_host_ns + fit->intercept + fit->slope * x;
+}
+
+static void report_fit(const clock_fit_t *fit, uint32_t paired,
+                       uint32_t missed, uint32_t steps) {
+  if (fit->count < 4) {
+    ESP_LOGW(TAG, "CLOCKLINK,%" PRIu32 ",%" PRIu32 ",too few pairs", paired,
+             missed);
+    return;
+  }
   ESP_LOGI(TAG,
            "CLOCKLINK,%" PRIu32 ",%" PRIu32 ",rate %.3f ppm,residual rms %.1f "
-           "ns p-p %.1f ns over %d edges",
-           paired, missed, (slope - 1.0) * 1e6, sqrt(sum_rr / count),
-           high - low, count);
+           "ns p-p %.1f ns over %d edges,steps %" PRIu32,
+           paired, missed, (fit->slope - 1.0) * 1e6, fit->rms,
+           fit->peak_to_peak, fit->count, steps);
 }
 
 /* The ticks left before end, or 0 once it has passed. */
@@ -221,15 +262,13 @@ static bool wait_edge(uint32_t sequence, hosted_avb_clock_link_edge_t *edge) {
 static void link_task(void *arg) {
   hosted_avb_clock_pair_t ring[FIT_SIZE];
   int ring_count = 0, ring_next = 0;
-  uint32_t sequence = 0, paired = 0, missed = 0;
+  uint32_t sequence = 0, paired = 0, missed = 0, steps = 0;
+  clock_fit_t fit = {0};
   int64_t next_report = esp_timer_get_time() + REPORT_PERIOD_US;
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(CONFIG_HOSTED_AVB_CLOCK_LINK_PERIOD_MS));
     if (esp_timer_get_time() >= next_report) {
-      hosted_avb_clock_pair_t ordered[FIT_SIZE];
-      for (int i = 0; i < ring_count; i++)
-        ordered[i] = ring[(ring_next - ring_count + i + FIT_SIZE) % FIT_SIZE];
-      report_fit(ordered, ring_count, paired, missed);
+      report_fit(&fit, paired, missed, steps);
       next_report = esp_timer_get_time() + REPORT_PERIOD_US;
     }
     sequence++;
@@ -258,15 +297,30 @@ static void link_task(void *arg) {
                         (edge.mac_after_ticks - edge.mac_before_ticks) / 2,
         .cp_mac_us = edge.mac_us,
     };
-    portENTER_CRITICAL(&s_latest_lock);
-    s_latest = pair;
-    s_have_latest = true;
-    portEXIT_CRITICAL(&s_latest_lock);
+    /* A pair far off the fit means the host clock was stepped (or the
+     * coprocessor restarted): start the fit again from this pair. */
+    if (fit.count >= 2 &&
+        fabs((double)ptp_ns - fit_host_ns(&fit, pair.cp_ticks)) >
+            STEP_LIMIT_NS) {
+      ring_count = 0;
+      steps++;
+      ESP_LOGW(TAG, "Clock step of %.0f ns: fitting again",
+               (double)ptp_ns - fit_host_ns(&fit, pair.cp_ticks));
+    }
     ring[ring_next] = pair;
     ring_next = (ring_next + 1) % FIT_SIZE;
     if (ring_count < FIT_SIZE)
       ring_count++;
     paired++;
+    hosted_avb_clock_pair_t ordered[FIT_SIZE];
+    for (int i = 0; i < ring_count; i++)
+      ordered[i] = ring[(ring_next - ring_count + i + FIT_SIZE) % FIT_SIZE];
+    fit_pairs(ordered, ring_count, &fit);
+    portENTER_CRITICAL(&s_latest_lock);
+    s_latest = pair;
+    s_have_latest = true;
+    s_fit = fit;
+    portEXIT_CRITICAL(&s_latest_lock);
   }
 }
 
@@ -310,6 +364,20 @@ bool hosted_avb_clock_link_latest(hosted_avb_clock_pair_t *pair) {
   return have;
 }
 
+bool hosted_avb_clock_link_to_host(int64_t cp_ns, int64_t *host_ns) {
+  portENTER_CRITICAL(&s_latest_lock);
+  clock_fit_t fit = s_fit;
+  portEXIT_CRITICAL(&s_latest_lock);
+  if (!fit.valid || esp_timer_get_time() - fit.updated_us > FIT_MAX_AGE_US)
+    return false;
+  int64_t span = cp_ns - (int64_t)fit.anchor_ticks * TICK_NS;
+  if (span < -FIT_MAX_SPAN_NS || span > FIT_MAX_SPAN_NS)
+    return false;
+  *host_ns = fit.anchor_host_ns +
+             (int64_t)llround(fit.intercept + fit.slope * (double)span);
+  return true;
+}
+
 #endif /* host */
 
 /* --------------------------------------------------------- coprocessor */
@@ -332,12 +400,16 @@ static DRAM_ATTR struct {
 static DRAM_ATTR hosted_avb_clock_link_edge_t s_edge;
 static DRAM_ATTR TaskHandle_t s_cp_task;
 static uint32_t s_cp_boot;
+/* The last soft latch taken outside the edge handler. A bracketed read
+ * that straddles an edge overwrites the edge's hardware latch with it. */
+static DRAM_ATTR volatile uint64_t s_last_soft_latch;
 
 static void IRAM_ATTR on_edge(void *arg) {
   uint64_t ticks;
   /* The hardware latch first: the bracket's soft latches overwrite it. */
   if (gptimer_get_captured_count(s_cp_timer, &ticks) != ESP_OK)
     return;
+  bool overwritten = ticks == s_last_soft_latch;
   uint64_t before = 0, after = 0;
   uint32_t mac_us = 0;
 #ifdef MAC_CLOCK_REG
@@ -349,7 +421,7 @@ static void IRAM_ATTR on_edge(void *arg) {
   if (s_arm.armed && ticks != s_arm.baseline) {
     s_edge = (hosted_avb_clock_link_edge_t){
         .version = HOSTED_AVB_CLOCK_LINK_VERSION,
-        .valid = 1,
+        .valid = !overwritten,
         .host_boot = s_arm.host_boot,
         .sequence = s_arm.sequence,
         .coprocessor_boot = s_cp_boot,
@@ -367,6 +439,19 @@ static void IRAM_ATTR on_edge(void *arg) {
     vTaskNotifyGiveFromISR(s_cp_task, &woken);
     portYIELD_FROM_ISR(woken);
   }
+}
+
+bool hosted_avb_clock_link_coprocessor_read(volatile const uint32_t *reg,
+                                            int64_t *before_ns, uint32_t *value,
+                                            int64_t *after_ns) {
+  if (!s_cp_timer)
+    return false;
+  uint64_t before, after;
+  hosted_avb_timer_bracket(s_cp_timer, reg, &before, value, &after);
+  s_last_soft_latch = after;
+  *before_ns = (int64_t)before * TICK_NS;
+  *after_ns = (int64_t)after * TICK_NS;
+  return true;
 }
 
 static void on_arm(uint32_t msg_id, const uint8_t *data, size_t length,

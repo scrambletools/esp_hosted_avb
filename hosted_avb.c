@@ -188,8 +188,21 @@ static void set_vendor_ie_callback(uint32_t msg_id, const uint8_t *data,
       tsf_offset = 6 + PTP_VND_IE_SUBID_LEN + PTP_VND_IE_FOLLOW_UP_LEN;
     }
   }
-  if (tsf_offset != 0 &&
-      tsf_offset + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN <= vnd_ie_len) {
+  /* A component that knows gPTP time here writes both markers for one
+   * instant (hosted_avb_beacon_time_fill); otherwise only the TSF. */
+  static uint32_t s_filled, s_patched;
+  bool beacon_time = tsf_offset != 0 &&
+      tsf_offset + PTP_VND_IE_TSF_MAPPING_PAYLOAD_LEN <= vnd_ie_len;
+  if (beacon_time && hosted_avb_beacon_time_fill &&
+      hosted_avb_beacon_time_fill(vnd_ie + 6 + PTP_VND_IE_SUBID_LEN,
+                                  PTP_VND_IE_FOLLOW_UP_LEN,
+                                  vnd_ie + tsf_offset)) {
+    if ((++s_filled % 80) == 1)
+      ESP_LOGI(TAG, "Beacon time element filled for one instant #%u "
+               "(%u with the TSF patched only)",
+               (unsigned)s_filled, (unsigned)s_patched);
+  } else if (beacon_time) {
+    s_patched++;
     int64_t tsf_us = esp_wifi_get_tsf_time(WIFI_IF_AP);
     uint64_t v = (uint64_t)tsf_us;
     uint8_t *tsf = vnd_ie + tsf_offset;

@@ -405,6 +405,7 @@ bool hosted_avb_clock_link_to_host(int64_t cp_ns, int64_t *host_ns) {
 
 #define CP_GPIO CONFIG_HOSTED_AVB_CLOCK_LINK_COPROCESSOR_GPIO
 #if CONFIG_IDF_TARGET_ESP32C6
+#include "esp_wifi.h"
 /* The Wi-Fi MAC's microsecond clock, read beside each edge. */
 #define MAC_CLOCK_REG ((volatile const uint32_t *)0x600ad000U)
 #endif
@@ -525,9 +526,54 @@ bool hosted_avb_clock_link_map_mac(hosted_avb_mac_map_t *map) {
   };
   return true;
 }
+#define TSF_TRIES 8
+#define TSF_MAX_BRACKET_NS 50000
+
+/* The TSF is a microsecond count read through the Wi-Fi library, so its
+ * read is bracketed by two latches rather than inside one: it reached
+ * the value read within a microsecond before the read, which lies
+ * between the latches. */
+bool hosted_avb_clock_link_ap_tsf(int64_t *tsf_us, int64_t *cp_ns,
+                                  uint32_t *uncertainty_ns) {
+  int64_t best_low = 0, best_high = 0, best_tsf = 0;
+  bool found = false;
+  for (unsigned attempt = 0; attempt < TSF_TRIES; attempt++) {
+    int64_t before, start, end, after;
+    uint32_t unused;
+    if (!hosted_avb_clock_link_coprocessor_read(MAC_CLOCK_REG, &before,
+                                                &unused, &start))
+      return false;
+    int64_t tsf = esp_wifi_get_tsf_time(WIFI_IF_AP);
+    if (!hosted_avb_clock_link_coprocessor_read(MAC_CLOCK_REG, &end, &unused,
+                                                &after))
+      return false;
+    if (tsf <= 0)
+      return false;
+    if (end - start > TSF_MAX_BRACKET_NS)
+      continue;
+    int64_t low = start - 1000, high = end;
+    if (!found || high - low < best_high - best_low) {
+      best_low = low;
+      best_high = high;
+      best_tsf = tsf;
+      found = true;
+    }
+  }
+  if (!found)
+    return false;
+  *tsf_us = best_tsf;
+  *cp_ns = best_low + (best_high - best_low) / 2;
+  *uncertainty_ns = (uint32_t)((best_high - best_low + 1) / 2);
+  return true;
+}
 #else
 bool hosted_avb_clock_link_map_mac(hosted_avb_mac_map_t *map) {
   *map = (hosted_avb_mac_map_t){0};
+  return false;
+}
+
+bool hosted_avb_clock_link_ap_tsf(int64_t *tsf_us, int64_t *cp_ns,
+                                  uint32_t *uncertainty_ns) {
   return false;
 }
 #endif

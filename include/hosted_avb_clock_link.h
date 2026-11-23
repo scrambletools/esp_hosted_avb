@@ -78,6 +78,15 @@ typedef struct {
  * False before the link has started or when the reads disagree. */
 bool hosted_avb_clock_link_map_mac(hosted_avb_mac_map_t *map);
 
+/* Coprocessor (ESP32-C6): the access point's TSF on the link's timer,
+ * read between two latches of the timer, the tightest of a few tries:
+ * when the TSF reached tsf_us the timer read cp_ns, within
+ * uncertainty_ns (the bracket and the TSF's microsecond step). TSF and
+ * timer run from the same crystal. False before the link has started or
+ * without an access point. Callable from a task. */
+bool hosted_avb_clock_link_ap_tsf(int64_t *tsf_us, int64_t *cp_ns,
+                                  uint32_t *uncertainty_ns);
+
 /* A MAC-clock timestamp in ps (an FTM t1..t4 on this chip) on the link's
  * timer, within a second of the map. */
 static inline bool hosted_avb_mac_map_convert(const hosted_avb_mac_map_t *map,

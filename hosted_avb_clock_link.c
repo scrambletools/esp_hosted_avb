@@ -352,8 +352,11 @@ esp_err_t hosted_avb_clock_link_start(void) {
   ESP_RETURN_ON_ERROR(hosted_avb_peer_register(HOSTED_AVB_MSG_CLOCK_LINK_EDGE,
                                                on_reply, NULL),
                       TAG, "register EDGE");
-  if (xTaskCreate(link_task, "clock_link", 4096, NULL, 3, &s_link_task) !=
-      pdPASS)
+  /* Core 0: unpinned, it sat behind an endpoint talker's busy-waiting
+   * task on core 1 and paired no edges while a stream played, so the
+   * host's Wi-Fi time drifted (650 us over 150 s). */
+  if (xTaskCreatePinnedToCore(link_task, "clock_link", 4096, NULL, 5,
+                              &s_link_task, 0) != pdPASS)
     return ESP_ERR_NO_MEM;
   ESP_LOGI(TAG, "Clock link on GPIO%d, an edge every %d ms", HOST_GPIO,
            CONFIG_HOSTED_AVB_CLOCK_LINK_PERIOD_MS);

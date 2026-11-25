@@ -254,8 +254,10 @@ esp_err_t hosted_avb_wifi_time_start(void) {
       hosted_avb_peer_register(HOSTED_AVB_MSG_WIFI_TIME, on_message, NULL);
   if (err != ESP_OK)
     return err;
-  if (xTaskCreate(wifi_time_task, "wifi_time", 4096, NULL, 3, &s_task) !=
-      pdPASS)
+  /* Core 0, as the clock link: unpinned it starved behind an endpoint
+   * talker on core 1 and the coprocessor's sessions were dropped. */
+  if (xTaskCreatePinnedToCore(wifi_time_task, "wifi_time", 4096, NULL, 5,
+                              &s_task, 0) != pdPASS)
     return ESP_ERR_NO_MEM;
   ESP_LOGI(TAG, "Receiving the coprocessor's Wi-Fi time");
   return ESP_OK;
